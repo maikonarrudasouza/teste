@@ -1,0 +1,1229 @@
+{ Strategy: Tape Reader - Fita WIN com Filtros Adaptativos }
+{ Author: Nelogica - Code Builder }
+{ Description: Leitura de fluxo de agressão (tape) via Assets de 1s com três sinais independentes (grandes negócios, velocidade e desequilíbrio), filtros de tendência M15, delta acumulado e camada opcional de análise de barras em múltiplos timeframes. Conversão fiel do Fita_WIN.mq5. }
+
+{ ============================================================ }
+{ LIMITAÇÕES DE CONVERSÃO MQL5 → NTSL                          }
+{ - Negócios individuais T&T: NÃO disponíveis no NTSL.         }
+{ - AgressionVolBuy/Sell retornam volume AGREGADO por candle.  }
+{ - Teto por negócio: aplicado ao volume total do candle 1s.  }
+{ - InicioRajada: não implementável; usa AskPrice/BidPrice.   }
+{ - Validade de ordem: resolução em minutos.                  }
+{ - Buffer circular: recalculado via loop a cada execução.    }
+{ ============================================================ }
+
+{ ============================================================ }
+{ CORREÇÕES (sinais que não acionavam)                         }
+{ 1) "Negócios" na janela = SEGUNDOS com agressão, logo nunca  }
+{    passa de JanelaVelocS (15). Com MinNegociosGrandes=20 e   }
+{    MinNegociosDeseq=20 os sinais 1 e 3 eram impossíveis.     }
+{    Agora o mínimo é limitado ao tamanho da janela e o padrão }
+{    passou para 5 segundos ativos.                            }
+{ 2) Velocidade comparava segundos ativos (curta) x segundos   }
+{    ativos (base). No WIN quase todo segundo tem negócio, o   }
+{    fator ficava ~1 e nunca chegava a 3. Agora compara VOLUME }
+{    agredido por segundo (janela curta x janela base).        }
+{ 3) Volume "neutro" usava Volume (financeiro, R$) menos a     }
+{    agressão (contratos). Isso inflava o total e derrubava os }
+{    percentuais de saldo/desequilíbrio. Total agora = compra  }
+{    agredida + venda agredida.                                }
+{ 4) TetoDeLote descartava o segundo inteiro acima do teto,    }
+{    justamente as rajadas que deveriam gerar sinal. Padrão    }
+{    agora é 0 (desligado).                                    }
+{ 5) Os 3 loops sobre o ativo de 1s viraram 1 só (menos       }
+{    lentidão). Padrões ajustados para gráfico de 1 minuto:    }
+{    janela de 60s, limites ~4x maiores e OffsetOrdem = 0.     }
+{ 6) Base de velocidade e delta lidos em candles de 1 min (10  }
+{    leituras em vez de 600). Padrões para gráfico de 10s:     }
+{    janela 11s, mínimo 6 seg ativos, VolMinDeseq 250,         }
+{    VolLiqMinGrandes 150. MinNegociosVeloc agora em minutos.  }
+{ 7) Ordens: a limitada agora é reenviada a cada candle até    }
+{    vencer (no NTSL ordem não reenviada é cancelada); stop e  }
+{    gain passam a ser enviados de verdade; tempo usa a hora   }
+{    do candle e zera a cada dia; entrada é registrada antes   }
+{    do trailing.                                              }
+{ ============================================================ }
+
+const
+    ATIVO_1S = Asset(GetAsset, itSecond, 1);
+    ATIVO_M1 = Asset(GetAsset, itMinute, 1);
+    ATIVO_M15 = Asset(GetAsset, itMinute, 15);
+    ATIVO_BARRAS = Asset(GetAsset, itMinute, 5);
+
+input
+
+    { ============================================================ }
+    { SINAIS ATIVOS                                                }
+    { ============================================================ }
+
+    UsarGrandes(1);
+    UsarVelocidade(1);
+    UsarDesequilibrio(1);
+    MinSinais(2);
+
+    { ============================================================ }
+    { JANELAS DE LEITURA DA FITA                                   }
+    { ============================================================ }
+
+    JanelaVelocS(11);
+    JanelaBaseS(600);
+
+    { ============================================================ }
+    { SINAL 1: GRANDES LOTES                                       }
+    { ============================================================ }
+
+    LoteGrande(50);
+    TetoDeLote(0);
+    VolLiqMinGrandes(150);
+    MinNegociosGrandes(6);    { segundos com agressão na janela curta (máx = JanelaVelocS) }
+
+    { ============================================================ }
+    { SINAL 2: VELOCIDADE                                          }
+    { ============================================================ }
+
+    FatorVelocidade(3);
+    MinNegociosVeloc(5);      { MINUTOS com agressão na janela base (máx = JanelaBaseS/60) }
+    SaldoMinVelocPerc(20);
+
+    { ============================================================ }
+    { SINAL 3: DESEQUILÍBRIO DE AGRESSÃO                           }
+    { ============================================================ }
+
+    MinNegociosDeseq(6);      { segundos com agressão na janela curta (máx = JanelaVelocS) }
+    VolMinDeseq(250);
+    DeseqMinPerc(60);
+
+    { ============================================================ }
+    { FILTRO DE TENDÊNCIA (M15 + EMA50)                            }
+    { ============================================================ }
+
+    UsarFiltroTend(1);
+    PeriodoEMA(50);
+    DistanciaNeutra(50);
+    SinaisIgnoraTend(3);
+
+    { ============================================================ }
+    { DELTA ACUMULADO                                              }
+    { ============================================================ }
+
+    UsarAcumulado(1);
+    JanelaDeltaS(600);
+    DeltaMinContrat(500);
+
+    { ============================================================ }
+    { ENTRADA                                                      }
+    { ============================================================ }
+
+    OffsetOrdem(0);
+
+    { ============================================================ }
+    { STOP / GAIN / TRAILING                                       }
+    { ============================================================ }
+
+    StopPontos(125);
+    FolgaStop(50);            { distância entre o preço de disparo do stop e o limite da ordem }
+    GainPontos(1000);
+    BreakevenEm(50);
+    TravaInicial(25);
+    DegrauPts(5);
+
+    { ============================================================ }
+    { TEMPO E COOLDOWN                                              }
+    { ============================================================ }
+
+    HoraInicio(0900);
+    HoraFim(1700);
+    CooldownMin(5);
+    ValidadeOrdemMin(1);
+
+    { ============================================================ }
+    { ANÁLISE DE BARRAS                                            }
+    { ============================================================ }
+
+    UsarAnaliseBarras(0);
+    ModoAnaliseBarras(0);
+    QtdBarrasAnalise(3);
+    VolMedioBarrasPer(20);
+
+var
+
+    { ============================================================ }
+    { VARIÁVEIS DE TAPE — JANELA CURTA                            }
+    { ============================================================ }
+
+    vAgrBuyJanela : Float;
+    vAgrSellJanela : Float;
+    vTradesJanela : Integer;
+    vVolTotalJanela : Float;
+    vVolGrandesLiq : Float;
+    vTradesGrandes : Integer;
+
+    { ============================================================ }
+    { VARIÁVEIS DE TAPE — JANELA BASE                              }
+    { ============================================================ }
+
+    vTradesBase : Integer;
+    vVolTotalBase : Float;
+
+    { ============================================================ }
+    { VARIÁVEIS DOS SINAIS DE TAPE                                 }
+    { ============================================================ }
+
+    sSinalGrandes : Integer;
+    sSinalVelocidade : Integer;
+    sSinalDeseq : Integer;
+
+    nSomaSinais : Integer;
+    bSinalForte : Boolean;
+    bSinalValido : Boolean;
+
+    nDirecaoFinal : Integer;
+    nCompras : Integer;
+    nVendas : Integer;
+    nConcordam : Integer;
+
+    nMinGrandes : Integer;
+    nMinDeseq : Integer;
+
+    { ============================================================ }
+    { VARIÁVEIS DE TENDÊNCIA                                       }
+    { ============================================================ }
+
+    vEMA50_M15 : Float;
+    vPrecoM15 : Float;
+    nTendencia : Integer;
+    vDistTend : Float;
+
+    { ============================================================ }
+    { VARIÁVEIS DE DELTA                                           }
+    { ============================================================ }
+
+    vDeltaAcum : Float;
+    vVolDeltaTotal : Float;
+    nDeltaDirecao : Integer;
+    vAgrBuyDelta : Float;
+    vAgrSellDelta : Float;
+
+    { ============================================================ }
+    { VARIÁVEIS DE ANÁLISE DE BARRAS                              }
+    { ============================================================ }
+
+    nDirecaoBarras : Integer;
+    vCorpoBarraAtual : Float;
+    vAmplBarraAtual : Float;
+    vPavioSup : Float;
+    vPavioInf : Float;
+    vVolBarraAtual : Float;
+    vVolMedioBarras : Float;
+
+    bBarraForcaComp : Boolean;
+    bBarraForcaVend : Boolean;
+    bRompMaxima : Boolean;
+    bRompMinima : Boolean;
+
+    nSeqBarras : Integer;
+    bTendBarras : Boolean;
+    nAgrBarras : Integer;
+
+    { ============================================================ }
+    { VARIÁVEIS DE CONTROLE DE ORDENS                              }
+    { ============================================================ }
+
+    vPrecoEntrada : Float;
+    vStopAtual : Float;
+    vGainAtual : Float;
+
+    bBreakevenAtivo : Boolean;
+    bOrdemPendente : Boolean;
+
+    nMinUltimaEntrada : Integer;
+    nMinOrdemPendente : Integer;
+    nTempoAtualMin : Integer;
+    nDataAtual : Integer;
+    nDirecaoOrdem : Integer;
+    vPrecoOrdem : Float;
+
+    bDentroHorario : Boolean;
+    bCooldownOk : Boolean;
+    bOrdemExpirada : Boolean;
+
+    { ============================================================ }
+    { VARIÁVEIS AUXILIARES                                         }
+    { ============================================================ }
+
+    vVelocJanela : Float;
+    vVelocBase : Float;
+    vFatorVeloc : Float;
+
+    vPercSaldoVeloc : Float;
+    vPercDeseq : Float;
+    vSaldoDeseq : Float;
+
+    nDegraus : Integer;
+    vAvancoStop : Float;
+    vNovoStop : Float;
+    vLucroPts : Float;
+
+    i : Integer;
+
+    vVolCandle1s : Float;
+    vBuy1s : Float;
+    vSell1s : Float;
+    nBarrasBase : Integer;
+    nBarrasDelta : Integer;
+    nMinVeloc : Integer;
+
+initialization
+begin
+
+    vPrecoEntrada := 0;
+    vStopAtual := 0;
+    vGainAtual := 0;
+
+    bBreakevenAtivo := False;
+    bOrdemPendente := False;
+
+    nMinUltimaEntrada := 0;
+    nMinOrdemPendente := 0;
+    nDataAtual := 0;
+    nDirecaoOrdem := 0;
+    vPrecoOrdem := 0;
+
+    nDirecaoFinal := 0;
+    nTendencia := 0;
+    nDeltaDirecao := 0;
+    nDirecaoBarras := 0;
+
+    sSinalGrandes := 0;
+    sSinalVelocidade := 0;
+    sSinalDeseq := 0;
+
+end;
+
+begin
+
+    { ============================================================ }
+    { BLOCO 0: CONTROLE DE HORÁRIO, TEMPO E REGISTRO DA ENTRADA  }
+    { ============================================================ }
+
+    bDentroHorario := (Time >= HoraInicio) and (Time <= HoraFim);
+
+    { Hora do CANDLE, não do relógio do PC (CurrentTime travava   }
+    { cooldown e validade no backtest e na virada do dia)         }
+    nTempoAtualMin := TimeToMinutes(Time);
+
+    { Novo pregão: zera controles do dia anterior }
+    if (Date <> nDataAtual) then
+    begin
+        nDataAtual := Date;
+        nMinUltimaEntrada := 0;
+        nMinOrdemPendente := 0;
+        bOrdemPendente := False;
+        nDirecaoOrdem := 0;
+    end;
+
+    { Registro da entrada ANTES do trailing (antes o trailing     }
+    { rodava com preço de entrada = 0 no primeiro candle)         }
+    if IsBought and (vPrecoEntrada = 0) then
+    begin
+        vPrecoEntrada := BuyPrice;
+        vStopAtual := vPrecoEntrada - StopPontos;
+        vGainAtual := vPrecoEntrada + GainPontos;
+        bBreakevenAtivo := False;
+        bOrdemPendente := False;
+        nDirecaoOrdem := 0;
+        nMinUltimaEntrada := nTempoAtualMin;
+    end;
+
+    if IsSold and (vPrecoEntrada = 0) then
+    begin
+        vPrecoEntrada := SellPrice;
+        vStopAtual := vPrecoEntrada + StopPontos;
+        vGainAtual := vPrecoEntrada - GainPontos;
+        bBreakevenAtivo := False;
+        bOrdemPendente := False;
+        nDirecaoOrdem := 0;
+        nMinUltimaEntrada := nTempoAtualMin;
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 1: TRAILING POR DEGRAU                                 }
+    { ============================================================ }
+
+    if IsBought then
+    begin
+
+        vLucroPts := Close - vPrecoEntrada;
+
+        if (not bBreakevenAtivo) and (vLucroPts >= BreakevenEm) then
+        begin
+            bBreakevenAtivo := True;
+            vStopAtual := vPrecoEntrada + TravaInicial;
+        end;
+
+        if bBreakevenAtivo and (DegrauPts > 0) then
+        begin
+
+            nDegraus := Round((vLucroPts - BreakevenEm) / DegrauPts);
+
+            if (nDegraus < 0) then
+                nDegraus := 0;
+
+            vAvancoStop := TravaInicial + (nDegraus * DegrauPts);
+            vNovoStop := vPrecoEntrada + vAvancoStop;
+
+            if (vNovoStop > vStopAtual) then
+                vStopAtual := vNovoStop;
+
+        end;
+
+    end
+
+    else if IsSold then
+    begin
+
+        vLucroPts := vPrecoEntrada - Close;
+
+        if (not bBreakevenAtivo) and (vLucroPts >= BreakevenEm) then
+        begin
+            bBreakevenAtivo := True;
+            vStopAtual := vPrecoEntrada - TravaInicial;
+        end;
+
+        if bBreakevenAtivo and (DegrauPts > 0) then
+        begin
+
+            nDegraus := Round((vLucroPts - BreakevenEm) / DegrauPts);
+
+            if (nDegraus < 0) then
+                nDegraus := 0;
+
+            vAvancoStop := TravaInicial + (nDegraus * DegrauPts);
+            vNovoStop := vPrecoEntrada - vAvancoStop;
+
+            if (vNovoStop < vStopAtual) then
+                vStopAtual := vNovoStop;
+
+        end;
+
+    end
+
+    else
+    begin
+
+        vPrecoEntrada := 0;
+        vStopAtual := 0;
+        vGainAtual := 0;
+        bBreakevenAtivo := False;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 2/3: LEITURA DO TAPE                                  }
+    { Janela curta: candles de 1s (poucas leituras).              }
+    { Janela base e delta: candles de 1 MINUTO. Antes eram 600    }
+    { leituras de 1s por execução, o que travava gráficos curtos  }
+    { (10s/30s). Agora são ~10 leituras de M1.                    }
+    { ============================================================ }
+
+    vAgrBuyJanela := 0;
+    vAgrSellJanela := 0;
+    vTradesJanela := 0;
+    vVolGrandesLiq := 0;
+    vTradesGrandes := 0;
+
+    for i := 0 to JanelaVelocS - 1 do
+    begin
+
+        vBuy1s := ATIVO_1S.AgressionVolBuy[i];
+        vSell1s := ATIVO_1S.AgressionVolSell[i];
+        vVolCandle1s := vBuy1s + vSell1s;
+
+        if (vVolCandle1s > 0) and
+           ((TetoDeLote <= 0) or (vVolCandle1s <= TetoDeLote)) then
+        begin
+
+            vAgrBuyJanela := vAgrBuyJanela + vBuy1s;
+            vAgrSellJanela := vAgrSellJanela + vSell1s;
+            vTradesJanela := vTradesJanela + 1;
+
+            if (vVolCandle1s >= LoteGrande) then
+            begin
+                vVolGrandesLiq := vVolGrandesLiq + vBuy1s - vSell1s;
+                vTradesGrandes := vTradesGrandes + 1;
+            end;
+
+        end;
+
+    end;
+
+    { Janela base (velocidade de referência) em candles de 1 min }
+    nBarrasBase := Round(JanelaBaseS / 60);
+    if (nBarrasBase < 1) then
+        nBarrasBase := 1;
+
+    vTradesBase := 0;
+    vVolTotalBase := 0;
+
+    for i := 0 to nBarrasBase - 1 do
+    begin
+
+        vVolCandle1s :=
+            ATIVO_M1.AgressionVolBuy[i] +
+            ATIVO_M1.AgressionVolSell[i];
+
+        if (vVolCandle1s > 0) then
+        begin
+            vTradesBase := vTradesBase + 1;
+            vVolTotalBase := vVolTotalBase + vVolCandle1s;
+        end;
+
+    end;
+
+    { Delta acumulado em candles de 1 min }
+    vAgrBuyDelta := 0;
+    vAgrSellDelta := 0;
+    vVolDeltaTotal := 0;
+
+    if (UsarAcumulado = 1) then
+    begin
+
+        nBarrasDelta := Round(JanelaDeltaS / 60);
+        if (nBarrasDelta < 1) then
+            nBarrasDelta := 1;
+
+        for i := 0 to nBarrasDelta - 1 do
+        begin
+            vAgrBuyDelta := vAgrBuyDelta + ATIVO_M1.AgressionVolBuy[i];
+            vAgrSellDelta := vAgrSellDelta + ATIVO_M1.AgressionVolSell[i];
+        end;
+
+        vVolDeltaTotal := vAgrBuyDelta + vAgrSellDelta;
+
+    end;
+
+    { Total = só volume agredido (mesma unidade de compra e venda) }
+    vVolTotalJanela :=
+        vAgrBuyJanela +
+        vAgrSellJanela;
+
+
+    { Mínimos de "negócios" não podem passar do tamanho da janela }
+    nMinGrandes := MinNegociosGrandes;
+    if (nMinGrandes > JanelaVelocS) then
+        nMinGrandes := JanelaVelocS;
+
+    nMinDeseq := MinNegociosDeseq;
+    if (nMinDeseq > JanelaVelocS) then
+        nMinDeseq := JanelaVelocS;
+
+
+    { ============================================================ }
+    { BLOCO 4: SINAL 1 — GRANDES LOTES                            }
+    { ============================================================ }
+
+    sSinalGrandes := 0;
+
+    if (UsarGrandes = 1) then
+    begin
+
+        if (vTradesJanela >= nMinGrandes) and
+           (Abs(vVolGrandesLiq) >= VolLiqMinGrandes) then
+        begin
+
+            if (vVolGrandesLiq > 0) then
+                sSinalGrandes := 1
+            else
+                sSinalGrandes := -1;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 5: SINAL 2 — VELOCIDADE                               }
+    { Volume agredido por segundo: janela curta x janela base     }
+    { ============================================================ }
+
+    sSinalVelocidade := 0;
+    vFatorVeloc := 0;
+
+    if (UsarVelocidade = 1) then
+    begin
+
+        nMinVeloc := MinNegociosVeloc;
+        if (nMinVeloc > nBarrasBase) then
+            nMinVeloc := nBarrasBase;
+
+        if (vTradesBase >= nMinVeloc) then
+        begin
+
+            if (JanelaVelocS > 0) then
+                vVelocJanela :=
+                    vVolTotalJanela / JanelaVelocS
+            else
+                vVelocJanela := 0;
+
+            if (JanelaBaseS > 0) then
+                vVelocBase :=
+                    vVolTotalBase / JanelaBaseS
+            else
+                vVelocBase := 0;
+
+            if (vVelocBase > 0) then
+                vFatorVeloc :=
+                    vVelocJanela / vVelocBase
+            else
+                vFatorVeloc := 0;
+
+            if (vFatorVeloc >= FatorVelocidade) then
+            begin
+
+                if (vVolTotalJanela > 0) then
+                    vPercSaldoVeloc :=
+                        Abs(vAgrBuyJanela - vAgrSellJanela) /
+                        vVolTotalJanela * 100
+                else
+                    vPercSaldoVeloc := 0;
+
+                if (vPercSaldoVeloc >= SaldoMinVelocPerc) then
+                begin
+
+                    if (vAgrBuyJanela > vAgrSellJanela) then
+                        sSinalVelocidade := 1
+                    else
+                        sSinalVelocidade := -1;
+
+                end;
+
+            end;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 6: SINAL 3 — DESEQUILÍBRIO                           }
+    { ============================================================ }
+
+    sSinalDeseq := 0;
+    vPercDeseq := 0;
+
+    if (UsarDesequilibrio = 1) then
+    begin
+
+        if (vTradesJanela >= nMinDeseq) and
+           (vVolTotalJanela >= VolMinDeseq) then
+        begin
+
+            if (vVolTotalJanela > 0) then
+            begin
+
+                if (vAgrBuyJanela >= vAgrSellJanela) then
+                    vPercDeseq :=
+                        vAgrBuyJanela /
+                        vVolTotalJanela * 100
+                else
+                    vPercDeseq :=
+                        vAgrSellJanela /
+                        vVolTotalJanela * 100;
+
+            end
+
+            else
+                vPercDeseq := 0;
+
+            if (vPercDeseq >= DeseqMinPerc) then
+            begin
+
+                if (vAgrBuyJanela > vAgrSellJanela) then
+                    sSinalDeseq := 1
+                else
+                    sSinalDeseq := -1;
+
+            end;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 7: COMBINAÇÃO DOS 3 SINAIS                            }
+    { ============================================================ }
+
+    nCompras := 0;
+    nVendas := 0;
+
+    if (sSinalGrandes > 0) then
+        nCompras := nCompras + 1;
+
+    if (sSinalVelocidade > 0) then
+        nCompras := nCompras + 1;
+
+    if (sSinalDeseq > 0) then
+        nCompras := nCompras + 1;
+
+    if (sSinalGrandes < 0) then
+        nVendas := nVendas + 1;
+
+    if (sSinalVelocidade < 0) then
+        nVendas := nVendas + 1;
+
+    if (sSinalDeseq < 0) then
+        nVendas := nVendas + 1;
+
+    nSomaSinais :=
+        sSinalGrandes +
+        sSinalVelocidade +
+        sSinalDeseq;
+
+    bSinalForte :=
+        (nSomaSinais = 3) or
+        (nSomaSinais = -3);
+
+    nDirecaoFinal := 0;
+    nConcordam := 0;
+    bSinalValido := False;
+
+    { Compra: maioria atingiu MinSinais }
+    if (nCompras >= MinSinais) and
+       (nCompras > nVendas) then
+    begin
+
+        nDirecaoFinal := 1;
+        nConcordam := nCompras;
+        bSinalValido := True;
+
+    end
+
+    else
+    begin
+
+        { Venda: maioria atingiu MinSinais }
+        if (nVendas >= MinSinais) and
+           (nVendas > nCompras) then
+        begin
+
+            nDirecaoFinal := -1;
+            nConcordam := nVendas;
+            bSinalValido := True;
+
+        end
+
+        else
+        begin
+
+            nDirecaoFinal := 0;
+            nConcordam := 0;
+            bSinalValido := False;
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 8: FILTRO DE TENDÊNCIA — M15 + EMA50                  }
+    { ============================================================ }
+
+    nTendencia := 0;
+
+    if (UsarFiltroTend = 1) then
+    begin
+
+        vEMA50_M15 :=
+            MediaExp(PeriodoEMA, ATIVO_M15.Close);
+
+        vPrecoM15 :=
+            ATIVO_M15.Close;
+
+        vDistTend :=
+            vPrecoM15 - vEMA50_M15;
+
+        if (vDistTend > DistanciaNeutra) then
+            nTendencia := 1
+
+        else if (vDistTend < (0 - DistanciaNeutra)) then
+            nTendencia := -1;
+
+    end;
+
+
+    if (nDirecaoFinal <> 0) then
+    begin
+
+        if (UsarFiltroTend = 1) and
+           (not (bSinalForte and
+           (SinaisIgnoraTend > 0) and
+           (nConcordam >= SinaisIgnoraTend))) then
+        begin
+
+            if (nTendencia = 0) then
+                nDirecaoFinal := 0
+
+            else if (nTendencia <> nDirecaoFinal) then
+                nDirecaoFinal := 0;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 9: FILTRO DE DELTA ACUMULADO                          }
+    { ============================================================ }
+
+    nDeltaDirecao := 0;
+
+    if (UsarAcumulado = 1) then
+    begin
+
+        { Somas já calculadas no BLOCO 2/3 (candles de 1 min) }
+
+        vDeltaAcum :=
+            vAgrBuyDelta -
+            vAgrSellDelta;
+
+        if (vVolDeltaTotal >= DeltaMinContrat) then
+        begin
+
+            if (vDeltaAcum > 0) then
+                nDeltaDirecao := 1
+
+            else if (vDeltaAcum < 0) then
+                nDeltaDirecao := -1;
+
+        end;
+
+        if (nDirecaoFinal <> 0) and
+           (nDeltaDirecao <> 0) and
+           (nDeltaDirecao <> nDirecaoFinal) then
+            nDirecaoFinal := 0;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 10: ANÁLISE DE BARRAS                                }
+    { ============================================================ }
+
+    nDirecaoBarras := 0;
+
+    if (UsarAnaliseBarras = 1) then
+    begin
+
+        vCorpoBarraAtual :=
+            Abs(ATIVO_BARRAS.Close -
+            ATIVO_BARRAS.Open);
+
+        vAmplBarraAtual :=
+            ATIVO_BARRAS.High -
+            ATIVO_BARRAS.Low;
+
+        vPavioSup :=
+            ATIVO_BARRAS.High -
+            Max(ATIVO_BARRAS.Close,
+            ATIVO_BARRAS.Open);
+
+        vPavioInf :=
+            Min(ATIVO_BARRAS.Close,
+            ATIVO_BARRAS.Open) -
+            ATIVO_BARRAS.Low;
+
+        vVolBarraAtual :=
+            ATIVO_BARRAS.Volume;
+
+        vVolMedioBarras :=
+            MediaExp(VolMedioBarrasPer,
+            ATIVO_BARRAS.Volume);
+
+        bRompMaxima :=
+            (ATIVO_BARRAS.High >
+            ATIVO_BARRAS.High[1]);
+
+        bRompMinima :=
+            (ATIVO_BARRAS.Low <
+            ATIVO_BARRAS.Low[1]);
+
+        bBarraForcaComp := False;
+        bBarraForcaVend := False;
+
+        if (vAmplBarraAtual > 0) then
+        begin
+
+            if (ATIVO_BARRAS.Close >
+                ATIVO_BARRAS.Open) and
+               (ATIVO_BARRAS.Close >=
+                ATIVO_BARRAS.Low +
+                vAmplBarraAtual * 0.66) then
+                bBarraForcaComp := True;
+
+            if (ATIVO_BARRAS.Close <
+                ATIVO_BARRAS.Open) and
+               (ATIVO_BARRAS.Close <=
+                ATIVO_BARRAS.High -
+                vAmplBarraAtual * 0.66) then
+                bBarraForcaVend := True;
+
+        end;
+
+
+        nSeqBarras := 0;
+
+        for i := 0 to QtdBarrasAnalise - 1 do
+        begin
+
+            if (ATIVO_BARRAS.Close[i] >
+                ATIVO_BARRAS.Open[i]) then
+                nSeqBarras := nSeqBarras + 1
+
+            else if (ATIVO_BARRAS.Close[i] <
+                     ATIVO_BARRAS.Open[i]) then
+                nSeqBarras := nSeqBarras - 1;
+
+        end;
+
+
+        bTendBarras :=
+            (Abs(nSeqBarras) >=
+            Round(QtdBarrasAnalise * 0.6));
+
+
+        if (ATIVO_BARRAS.AgressionVolBuy >
+            ATIVO_BARRAS.AgressionVolSell) then
+            nAgrBarras := 1
+
+        else if (ATIVO_BARRAS.AgressionVolSell >
+                 ATIVO_BARRAS.AgressionVolBuy) then
+            nAgrBarras := -1
+
+        else
+            nAgrBarras := 0;
+
+
+        if bTendBarras then
+        begin
+
+            if (nSeqBarras > 0) then
+                nDirecaoBarras := 1
+
+            else if (nSeqBarras < 0) then
+                nDirecaoBarras := -1;
+
+        end
+
+        else
+            nDirecaoBarras := nAgrBarras;
+
+
+        if (nDirecaoFinal <> 0) then
+        begin
+
+            if (ModoAnaliseBarras = 1) and
+               (nDirecaoBarras <> 0) and
+               (nDirecaoBarras <> nDirecaoFinal) then
+                nDirecaoFinal := 0;
+
+            if (ModoAnaliseBarras = 2) and
+               (nDirecaoBarras <> nDirecaoFinal) then
+                nDirecaoFinal := 0;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 11: CONTROLE DE COOLDOWN E VALIDADE                   }
+    { ============================================================ }
+
+    bCooldownOk := True;
+    bOrdemExpirada := False;
+
+    if (nMinUltimaEntrada > 0) then
+    begin
+
+        if ((nTempoAtualMin -
+             nMinUltimaEntrada) < CooldownMin) then
+            bCooldownOk := False;
+
+    end;
+
+
+    if bOrdemPendente and (not HasPosition) then
+    begin
+
+        if ((nTempoAtualMin -
+             nMinOrdemPendente) >=
+             ValidadeOrdemMin) then
+        begin
+
+            { Expirou: basta parar de reenviar a ordem }
+            bOrdemExpirada := True;
+            bOrdemPendente := False;
+            nDirecaoOrdem := 0;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 12: LÓGICA DE ENTRADA                                }
+    { No NTSL uma ordem só vale para o candle seguinte. Se não    }
+    { for reenviada, é cancelada. Antes a ordem era enviada uma   }
+    { vez só e o robô ficava "pendente" sem ordem nenhuma no book.}
+    { ============================================================ }
+
+    { Mantém a ordem pendente viva enquanto estiver na validade }
+    if bOrdemPendente and
+       (not HasPosition) and
+       bDentroHorario then
+    begin
+
+        if (nDirecaoOrdem = 1) then
+            BuyLimit(vPrecoOrdem)
+
+        else if (nDirecaoOrdem = -1) then
+            SellShortLimit(vPrecoOrdem);
+
+    end;
+
+
+    { Novo sinal }
+    if bDentroHorario and
+       (nDirecaoFinal <> 0) and
+       (not HasPosition) and
+       (not bOrdemPendente) and
+       bCooldownOk then
+    begin
+
+        if (nDirecaoFinal = 1) then
+        begin
+
+            { No histórico AskPrice pode vir zerado: usa o Close }
+            if (AskPrice > 0) then
+                vPrecoOrdem := AskPrice - OffsetOrdem
+            else
+                vPrecoOrdem := Close - OffsetOrdem;
+
+            BuyLimit(vPrecoOrdem);
+
+            nDirecaoOrdem := 1;
+            bOrdemPendente := True;
+            nMinOrdemPendente := nTempoAtualMin;
+
+        end
+
+        else if (nDirecaoFinal = -1) then
+        begin
+
+            if (BidPrice > 0) then
+                vPrecoOrdem := BidPrice + OffsetOrdem
+            else
+                vPrecoOrdem := Close + OffsetOrdem;
+
+            SellShortLimit(vPrecoOrdem);
+
+            nDirecaoOrdem := -1;
+            bOrdemPendente := True;
+            nMinOrdemPendente := nTempoAtualMin;
+
+        end;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 13: STOP E GAIN NO BOOK                               }
+    { Antes o stop/gain/trailing só eram calculados e nunca       }
+    { enviados. Reenviados a cada candle (regra do NTSL).         }
+    { ============================================================ }
+
+    if bDentroHorario and IsBought and (vPrecoEntrada > 0) then
+    begin
+
+        SellToCoverStop(vStopAtual, vStopAtual - FolgaStop);
+        SellToCoverLimit(vGainAtual);
+
+    end
+
+    else if bDentroHorario and IsSold and (vPrecoEntrada > 0) then
+    begin
+
+        BuyToCoverStop(vStopAtual, vStopAtual + FolgaStop);
+        BuyToCoverLimit(vGainAtual);
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 14: ENCERRAMENTO NO FIM DO HORÁRIO                    }
+    { ============================================================ }
+
+    if (Time > HoraFim) and HasPosition then
+        ClosePosition;
+
+    if (Time > HoraFim) and bOrdemPendente then
+    begin
+
+        CancelPendingOrders;
+        bOrdemPendente := False;
+        nDirecaoOrdem := 0;
+
+    end;
+
+
+    { ============================================================ }
+    { BLOCO 15: XRAY                                               }
+    { ============================================================ }
+
+    XRay(
+        "Sinal Grandes",
+        (sSinalGrandes <> 0),
+        "Tape",
+        sSinalGrandes
+    );
+
+    XRay(
+        "Sinal Velocidade",
+        (sSinalVelocidade <> 0),
+        "Tape",
+        sSinalVelocidade
+    );
+
+    XRay(
+        "Sinal Deseq",
+        (sSinalDeseq <> 0),
+        "Tape",
+        sSinalDeseq
+    );
+
+    { Valores brutos para calibrar os limites }
+    XRay(
+        "Seg ativos janela",
+        (vTradesJanela >= nMinDeseq),
+        "Diagnostico",
+        vTradesJanela
+    );
+
+    XRay(
+        "Vol agredido janela",
+        (vVolTotalJanela >= VolMinDeseq),
+        "Diagnostico",
+        vVolTotalJanela
+    );
+
+    XRay(
+        "Grandes liquido",
+        (Abs(vVolGrandesLiq) >= VolLiqMinGrandes),
+        "Diagnostico",
+        vVolGrandesLiq
+    );
+
+    XRay(
+        "Fator velocidade",
+        (vFatorVeloc >= FatorVelocidade),
+        "Diagnostico",
+        vFatorVeloc
+    );
+
+    XRay(
+        "Deseq %",
+        (vPercDeseq >= DeseqMinPerc),
+        "Diagnostico",
+        vPercDeseq
+    );
+
+    XRay(
+        "Direcao Final",
+        (nDirecaoFinal <> 0),
+        "Sinais",
+        nDirecaoFinal
+    );
+
+    XRay(
+        "Tendencia M15",
+        (nTendencia <> 0),
+        "Filtros",
+        nTendencia
+    );
+
+    XRay(
+        "Delta Acumulado",
+        (nDeltaDirecao <> 0),
+        "Filtros",
+        nDeltaDirecao
+    );
+
+    XRay(
+        "Barras",
+        (nDirecaoBarras <> 0),
+        "Barras",
+        nDirecaoBarras
+    );
+
+    XRay(
+        "Dentro Horario",
+        bDentroHorario,
+        "Controle"
+    );
+
+    XRay(
+        "Cooldown OK",
+        bCooldownOk,
+        "Controle"
+    );
+
+    XRay(
+        "Ordem Pendente",
+        bOrdemPendente,
+        "Controle"
+    );
+
+
+    { ============================================================ }
+    { BLOCO 16: PLOTAGEM                                          }
+    { ============================================================ }
+
+    Plot(nDirecaoFinal);
+    SetPlotColor(
+        1,
+        RGB(255, 215, 0)
+    );
+
+    Plot2(nSomaSinais);
+    SetPlotColor(
+        2,
+        RGB(100, 200, 255)
+    );
+
+    Plot3(nTendencia);
+    SetPlotColor(
+        3,
+        RGB(200, 100, 255)
+    );
+
+    Plot4(nDeltaDirecao);
+    SetPlotColor(
+        4,
+        RGB(255, 150, 50)
+    );
+
+    if (UsarAnaliseBarras = 1) then
+    begin
+
+        Plot5(nDirecaoBarras);
+
+        SetPlotColor(
+            5,
+            RGB(50, 255, 150)
+        );
+
+    end;
+
+end;

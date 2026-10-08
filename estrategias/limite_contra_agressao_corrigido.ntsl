@@ -1,0 +1,148 @@
+{ Strategy: Limite Contra a Agressão com Filtro de Média 21 }
+{ Author: Nelogica - Code Builder }
+{ Description: Posiciona ordens limite a 150 pontos do fechamento quando o preço se move em um sentido, mas a agressão dominante é contrária, usando a média de 21 períodos como filtro. }
+
+{ ============================================================ }
+{ CORREÇÕES                                                    }
+{ 1) No NTSL uma ordem só vale para o candle seguinte; se não  }
+{    for reenviada, é cancelada. Antes a limitada era enviada  }
+{    só no candle do sinal e sumia no candle seguinte.         }
+{ 2) Ordem "escada": compra começa em Low - DistanciaPontos e  }
+{    a cada candle novo desce PassoPontos; venda começa em     }
+{    High + DistanciaPontos e sobe PassoPontos por candle.     }
+{    A ordem fica viva até: executar, surgir um sinal novo     }
+{    (que reinicia a escada) ou a tendência virar (fechamento  }
+{    cruzar a média contra a ordem).                           }
+{    Com AtualizarOrdem = false volta ao comportamento         }
+{    original (ordem só no candle do sinal, a partir do Close).}
+{    ReiniciarNoSinal = 0: sinal repetido no mesmo lado não     }
+{    reinicia a escada (evita a ordem "andar" só 10 pts quando  }
+{    há sinal em candles seguidos).                             }
+{ 3) Saídas estavam comentadas: a posição nunca era encerrada. }
+{    Stop e gain reativados, com preço arredondado ao tick e   }
+{    stop com limite (FolgaStop) para não ficar sem execução.  }
+{ ============================================================ }
+
+input
+    AtualizarOrdem(true);  { true = ordem em escada; false = comportamento original }
+    DistanciaPontos(150);  { true: Low - dist / High + dist; false: Close -/+ dist }
+    PeriodoMedia(21);      { Período da média usada como filtro }
+    StopPontos(150);       { Stop loss em pontos (ajustável) }
+    GainPontos(150);       { Take profit em pontos (ajustável) }
+    PassoPontos(50);       { Quanto a ordem se afasta a cada candle novo }
+    FolgaStop(50);         { Distância entre disparo do stop e o limite da ordem }
+    ReiniciarNoSinal(0);   { 0 = sinal repetido no mesmo lado não mexe na escada; 1 = reinicia em Low/High ± dist }
+
+var
+    mediaFiltro   : Float;    { Valor da média de 21 períodos }
+    aggCompra     : Float;    { Volume de agressão compradora }
+    aggVenda      : Float;    { Volume de agressão vendedora }
+    fechAnterior  : Float;    { Fechamento do candle anterior }
+    subindo       : Boolean;  { Preço subindo em relação ao candle anterior }
+    caindo        : Boolean;  { Preço caindo em relação ao candle anterior }
+    sinalVenda    : Boolean;  { Todas as condições de venda atendidas }
+    sinalCompra   : Boolean;  { Todas as condições de compra atendidas }
+    precoOrdem    : Float;    { Preço da ordem limite pendente }
+    dirOrdem      : Integer;  { 1 = compra pendente, -1 = venda pendente, 0 = nenhuma }
+    precoStop     : Float;
+    precoGain     : Float;
+
+begin
+    { Cálculo da média de 21 períodos (filtro de tendência) }
+    mediaFiltro := Media(PeriodoMedia, Close);
+
+    { Leitura da agressão de compra e de venda }
+    aggCompra := AgressionVolBuy;
+    aggVenda  := AgressionVolSell;
+
+    { Referência posicional atribuída a variável antes das condições }
+    fechAnterior := Close[1];
+
+    { Direção do preço }
+    subindo := (Close > fechAnterior);
+    caindo  := (Close < fechAnterior);
+
+    { Venda: subindo + agressão vendedora maior + preço abaixo da média 21 }
+    sinalVenda := subindo and (aggVenda > aggCompra) and (Close < mediaFiltro);
+
+    { Compra: caindo + agressão compradora maior + preço acima da média 21 }
+    sinalCompra := caindo and (aggCompra > aggVenda) and (Close > mediaFiltro);
+
+    if AtualizarOrdem then
+    begin
+        { Controle da ordem pendente (escada) }
+        if HasPosition then
+            dirOrdem := 0
+        else if (dirOrdem = 1) then
+        begin
+            { Compra pendente: cancela se a tendência virou, senão desce um degrau }
+            if (Close < mediaFiltro) then
+                dirOrdem := 0
+            else
+                precoOrdem := Round2Fraction(precoOrdem - PassoPontos);
+        end
+        else if (dirOrdem = -1) then
+        begin
+            { Venda pendente: cancela se a tendência virou, senão sobe um degrau }
+            if (Close > mediaFiltro) then
+                dirOrdem := 0
+            else
+                precoOrdem := Round2Fraction(precoOrdem + PassoPontos);
+        end;
+
+        { Entradas: só posiciona ordens se não houver posição aberta }
+        if not HasPosition then
+        begin
+            { Sinal novo reinicia a escada a partir do candle atual }
+            { Sinal no mesmo lado da ordem pendente só reinicia se ReiniciarNoSinal = 1 }
+            if sinalVenda and ((dirOrdem <> -1) or (ReiniciarNoSinal = 1)) then
+            begin
+                precoOrdem := Round2Fraction(High + DistanciaPontos);
+                dirOrdem := -1;
+            end
+            else if sinalCompra and ((dirOrdem <> 1) or (ReiniciarNoSinal = 1)) then
+            begin
+                precoOrdem := Round2Fraction(Low - DistanciaPontos);
+                dirOrdem := 1;
+            end;
+
+            { Reenvia a cada candle (no NTSL a ordem só vale 1 candle) }
+            if (dirOrdem = -1) then
+                SellShortLimit(precoOrdem)
+            else if (dirOrdem = 1) then
+                BuyLimit(precoOrdem);
+        end;
+    end
+    else
+    begin
+        { Modo original: ordem só no candle do sinal, a DistanciaPontos }
+        { do fechamento (no NTSL ela é cancelada no candle seguinte)    }
+        dirOrdem := 0;
+
+        if not HasPosition then
+        begin
+            if sinalVenda then
+                SellShortLimit(Round2Fraction(Close + DistanciaPontos))
+            else if sinalCompra then
+                BuyLimit(Round2Fraction(Close - DistanciaPontos));
+        end;
+    end;
+
+    { Saídas da posição comprada }
+    if IsBought then
+    begin
+        precoGain := Round2Fraction(BuyPrice + GainPontos);
+        precoStop := Round2Fraction(BuyPrice - StopPontos);
+        SellToCoverLimit(precoGain);
+        SellToCoverStop(precoStop, precoStop - FolgaStop);
+    end;
+
+    { Saídas da posição vendida }
+    if IsSold then
+    begin
+        precoGain := Round2Fraction(SellPrice - GainPontos);
+        precoStop := Round2Fraction(SellPrice + StopPontos);
+        BuyToCoverLimit(precoGain);
+        BuyToCoverStop(precoStop, precoStop + FolgaStop);
+    end;
+end;
