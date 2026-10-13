@@ -43,6 +43,9 @@ input int             InpBarrasAceitacao  = 3;          // Fechamentos seguidos 
 input bool            InpOperarRange      = true;       // Dentro da VA: comprar na VAL e vender na VAH
 input bool            InpOperarContinuacao= true;       // Fora da VA: teste da VAH/VAL rompida
 input bool            InpOperarVWAP       = true;       // Fora da VA: recuo até a VWAP da sessão
+input bool            InpFiltroVWAP       = true;       // Só compra com a VWAP subindo e só vende com ela caindo
+input int             InpVwapBarras       = 6;          // Barras do gatilho para medir a inclinação da VWAP
+input int             InpVwapMinPts       = 0;          // Inclinação mínima da VWAP nesse período (pontos)
 
 input group "Zona e gatilho"
 input int             InpTolerancia       = 30;         // Distância do nível que conta como teste (pontos)
@@ -89,6 +92,7 @@ CTrade   trade;
 Perfil   g_prev;
 double   g_naked[];
 double   g_vwap        = 0;
+double   g_vwapInclin  = 0;     // VWAP agora menos VWAP de N barras atrás
 datetime g_dia         = 0;
 datetime g_ultimaBarra = 0;
 bool     g_deltaDisponivel = true;
@@ -298,6 +302,17 @@ void AtualizarSessao()
      }
    if(v > 0)
       g_vwap = Arred(pv / v);
+
+   // inclinação: VWAP atual comparada com a VWAP calculada até N barras atrás
+   datetime antes = TimeCurrent() - InpVwapBarras * PeriodSeconds(InpTFGatilho);
+   double pvA = 0, vA = 0;
+   for(int i = 0; i < n && r[i].time < antes; i++)
+     {
+      double vb = VolumeBarra(r[i]);
+      pvA += vb * (r[i].high + r[i].low + r[i].close) / 3.0;
+      vA  += vb;
+     }
+   g_vwapInclin = (vA > 0 && g_vwap > 0) ? g_vwap - pvA / vA : 0;
 
    for(int i = ArraySize(g_naked) - 1; i >= 0; i--)
       if(g_naked[i] <= hi && g_naked[i] >= lo)
@@ -667,6 +682,12 @@ void Zerar()
 //+------------------------------------------------------------------+
 void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string nome)
   {
+   // filtro de tendência: VWAP precisa estar inclinada a favor (sem dados suficientes, não opera)
+   if(InpFiltroVWAP && dir * g_vwapInclin <= Pts(InpVwapMinPts))
+     {
+      PrintFormat("%s ignorado: VWAP não está %s", nome, dir > 0 ? "subindo" : "caindo");
+      return;
+     }
    double t = Tick();
    double entrada, sl;
    if(dir > 0)

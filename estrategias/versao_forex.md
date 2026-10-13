@@ -40,3 +40,7 @@ Com `InpFixo = false` volta a gestão original.
 Como o forex não tem delta, a absorção é lida por volume de ticks + pavio. Se a corretora tiver delta e `InpUsarDelta` estiver ligado, exige também agressão contra nessa barra.
 
 No TapeReading_FX, o setup de clímax já é uma absorção por definição (volume muito alto sem progresso), então não precisou de filtro novo.
+
+## Filtro de direção da VWAP (padrão ligado, também no Wyckoff20_WIN)
+
+`InpFiltroVWAP = true`: só compra se a VWAP do dia estiver subindo e só vende se estiver caindo. A inclinação é a VWAP atual menos a VWAP de 6 barras atrás (`InpVwapBarras`). `InpVwapMinPts` exige uma inclinação mínima, e 0 significa qualquer subida ou descida. Vale para todos os setups (VAL, VAH, continuação e recuo na VWAP).

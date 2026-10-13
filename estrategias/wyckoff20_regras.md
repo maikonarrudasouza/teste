@@ -62,3 +62,7 @@ O que o robô faz para ser rápido de forma realista:
 5. Na VPS com "máx. barras = 5000", cabem cerca de 8 pregões em M1, o que é suficiente para o perfil anterior e 5 VPOCs nus. Se aumentar `InpSessoesNaked`, suba esse limite.
 
 Comece na conta demo. Os parâmetros padrão vêm do livro (terço de fechamento, área de valor 70%) e de valores típicos do WIN, mas ainda não foram otimizados.
+
+## Filtro de direção da VWAP (padrão ligado)
+
+Só compra com a VWAP do dia subindo e só vende com ela caindo (VWAP atual menos a de 6 barras atrás, `InpVwapBarras`). No início do pregão, até haver 6 barras, não opera. Desligue com `InpFiltroVWAP = false`.
