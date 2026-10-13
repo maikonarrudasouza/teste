@@ -66,3 +66,11 @@ Comece na conta demo. Os parâmetros padrão vêm do livro (terço de fechamento
 ## Filtro de direção da VWAP (padrão ligado)
 
 Só compra com a VWAP do dia subindo e só vende com ela caindo (VWAP atual menos a de 6 barras atrás, `InpVwapBarras`). No início do pregão, até haver 6 barras, não opera. Desligue com `InpFiltroVWAP = false`.
+
+## Padrões atuais (versão de outubro)
+
+- Tempo gráfico M1, 1 contrato, sem aumento de mão.
+- Entrada por ordem limitada 250 pontos melhor que o fechamento do sinal, válida por 5 barras (`InpOffsetLimite`, `InpValidadeOrdem`). `InpTipoOrdem = ENTRADA_STOP` volta à entrada antiga.
+- Stop fixo de 150 pontos e alvo fixo de 500 pontos a partir do preço de entrada (`InpFixo = true`; sem parcial).
+- Trailing stop: depois de 50 pontos a favor, o stop fica 5 pontos (1 tick) atrás do preço e só anda a favor (`InpTrailAtivar`, `InpTrailDist`).
+- Zera às 17:50 (`InpZerarFimDia`).

@@ -55,3 +55,11 @@ Fontes: capítulo 1 de *Studies in Tape Reading* (Wyckoff, 1910, tradução come
 ## Diferença para o robô Wyckoff 2.0
 
 O `Wyckoff20_WIN` espera o preço chegar em níveis de volume (VAH, VAL, VWAP) no M5. Este aqui não usa níveis: lê só o esforço (volume e agressão) contra o resultado (preço) no M1, então opera mais vezes e com stop mais curto. Podem rodar juntos, com números mágicos diferentes. Na conta netting da B3, porém, os dois compartilham a mesma posição no WIN. O ideal é rodar um de cada vez ou em contas separadas.
+
+## Padrões atuais (versão de outubro)
+
+- Tempo gráfico M1, 1 contrato. Aumento de mão desligado (`InpPiramidar = false`).
+- Entrada por ordem limitada 250 pontos melhor que o fechamento do sinal, válida por 5 barras.
+- Stop fixo de 150 pontos e alvo fixo de 500 pontos (`InpFixo = true`, que também desliga zero a zero, stop por barras, saída por volume e virada de mão).
+- Trailing stop: depois de 50 pontos a favor, o stop fica 5 pontos (1 tick) atrás do preço e só anda a favor.
+- Zera às 17:50.

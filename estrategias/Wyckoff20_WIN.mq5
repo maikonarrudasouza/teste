@@ -17,6 +17,12 @@
 
 #include <Trade/Trade.mqh>
 
+enum ENUM_TIPO_ORDEM
+  {
+   ENTRADA_LIMITE = 0,  // Limitada (X pontos melhor que o fechamento do sinal)
+   ENTRADA_STOP   = 1   // Stop (rompimento da barra de sinal)
+  };
+
 enum ENUM_MODO_STOP
   {
    STOP_BARRA = 0,   // Do outro lado da barra de gatilho
@@ -25,13 +31,15 @@ enum ENUM_MODO_STOP
 
 input group "Geral"
 input ulong           InpMagic            = 202010;     // Número mágico
-input double          InpLotes            = 2;          // Contratos por entrada
-input ENUM_TIMEFRAMES InpTFGatilho        = PERIOD_M5;  // Tempo gráfico do gatilho
+input double          InpLotes            = 1;          // Contratos por entrada
+input ENUM_TIMEFRAMES InpTFGatilho        = PERIOD_M1;  // Tempo gráfico do gatilho
 
 input group "Horário (hora do servidor)"
 input string          InpInicio           = "09:15";    // Início das entradas
 input string          InpFimEntradas      = "17:00";    // Fim das entradas
-input string          InpZerar            = "17:50";    // Zerar tudo
+input string          InpZerar            = "17:50";    // Hora de zerar (só vale com as opções abaixo)
+input bool            InpZerarFimDia      = true;       // Zerar todo dia no horário InpZerar (false: só stop e alvo fecham)
+input bool            InpZerarSexta       = true;       // Zerar na sexta (só importa com o anterior desligado)
 
 input group "Perfil de volume"
 input int             InpPassoPerfil      = 5;          // Tamanho de cada faixa do perfil (pontos)
@@ -58,7 +66,21 @@ input double          InpTercoFech        = 0.33;       // Fechamento no terço 
 input bool            InpUsarDelta        = true;       // Exigir delta de agressão a favor
 input double          InpDeltaMinPct      = 10;         // Delta mínimo (% do volume agredido)
 input bool            InpExigirAbsorcao   = false;      // Exigir absorção antes do gatilho
-input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva
+input double          InpFatorAbsorcao    = 1.3;        // Absorção: volume >= fator x média
+input double          InpPavioMin         = 0.4;        // Absorção: pavio de rejeição >= fração do range
+input ENUM_TIPO_ORDEM InpTipoOrdem        = ENTRADA_LIMITE; // Tipo da ordem de entrada
+input int             InpOffsetLimite     = 250;        // Limitada: pontos melhor que o fechamento do sinal
+input int             InpValidadeOrdem    = 5;          // Barras que a ordem pendente fica viva
+
+input group "Stop e alvo fixos"
+input bool            InpFixo             = true;       // Usar stop e alvo fixos (desliga parcial e alvos por nível)
+input int             InpStopFixo         = 150;        // Stop fixo (pontos)
+input int             InpAlvoFixo         = 500;        // Alvo fixo (pontos)
+
+input group "Trailing stop"
+input bool            InpTrailing         = true;       // Ligar trailing stop
+input int             InpTrailAtivar      = 50;         // Ativa depois de X pontos a favor
+input int             InpTrailDist        = 5;          // Distância do stop para o preço (5 = 1 tick do WIN)
 
 input group "Risco e alvos"
 input ENUM_MODO_STOP  InpModoStop         = STOP_BARRA; // Onde fica o stop
@@ -418,27 +440,49 @@ bool BarraIntencao(const MqlRates &r[], int i, int dir)
   }
 
 //+------------------------------------------------------------------+
-//| Absorção: barra com agressão forte contra nós que não andou       |
-//| (compra: delta vendedor e fechamento na metade de cima)           |
+//| Absorção antes do gatilho: barra perto do nível, com volume alto, |
+//| que não conseguiu seguir contra nós. Na compra: pavio inferior    |
+//| grande e fechamento na metade de cima (vendas absorvidas por      |
+//| ordens limitadas). Usa preço + volume e, se houver delta,       |
+//| exige também agressão contra.                                    |
 //+------------------------------------------------------------------+
-bool Absorcao(const MqlRates &r[], int de, int ate, int dir)
+bool Absorcao(const MqlRates &r[], int de, int ate, int dir, double nivel)
   {
+   double tol = Pts(InpTolerancia), pen = Pts(InpPenetracaoMax);
    for(int i = de; i <= ate; i++)
      {
       double range = r[i].high - r[i].low;
       if(range <= 0)
          continue;
-      double pos = (r[i].close - r[i].low) / range;
-      double d, va;
-      if(!DeltaBarra(r[i].time, d, va))
+      bool perto = (dir > 0) ? (r[i].low  <= nivel + tol && r[i].low  >= nivel - pen)
+                             : (r[i].high >= nivel - tol && r[i].high <= nivel + pen);
+      if(!perto)
          continue;
-      bool agressaoContra = (-dir * d) >= InpDeltaMinPct / 100.0 * va;
+
+      double somaV = 0;
+      for(int k = i + 1; k <= i + InpMediaN; k++)
+         somaV += VolumeBarra(r[k]);
+      if(VolumeBarra(r[i]) < InpFatorAbsorcao * somaV / InpMediaN)
+         continue;
+
+      double pos   = (r[i].close - r[i].low) / range;
+      double pavio = (dir > 0) ? (MathMin(r[i].open, r[i].close) - r[i].low) / range
+                               : (r[i].high - MathMax(r[i].open, r[i].close)) / range;
       bool naoAndou = (dir > 0) ? (pos >= 0.5) : (pos <= 0.5);
-      if(agressaoContra && naoAndou)
-         return true;
+      if(!naoAndou || pavio < InpPavioMin)
+         continue;
+
+      if(InpUsarDelta && g_deltaDisponivel)
+        {
+         double d, va;
+         if(DeltaBarra(r[i].time, d, va) && (-dir * d) < InpDeltaMinPct / 100.0 * va)
+            continue;
+        }
+      return true;
      }
    return false;
   }
+
 
 //+------------------------------------------------------------------+
 //| Procura teste do nível + gatilho. Retorna true e preenche extremo |
@@ -478,7 +522,8 @@ bool Setup(const MqlRates &r[], int nHoje, double nivel, int dir, double &extrem
       if(!valido)
          continue;
 
-      if(InpExigirAbsorcao && g_deltaDisponivel && !Absorcao(r, 0, t, dir))
+      // absorção nas barras antes do gatilho (do teste até a barra anterior à SOS/SOW)
+      if(InpExigirAbsorcao && !Absorcao(r, 1, MathMax(t, 1), dir, nivel))
          continue;
       return true;
      }
@@ -558,9 +603,79 @@ void ResumoDia(int &entradas, double &resultado)
      }
   }
 
+//--- posições do robô (funciona em conta netting e hedging)
+int ListarPosicoes(ulong &t[])
+  {
+   ArrayResize(t, 0);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != (long)InpMagic)
+         continue;
+      int n = ArraySize(t);
+      ArrayResize(t, n + 1);
+      t[n] = tk;
+     }
+   return ArraySize(t);
+  }
+
 bool TemPosicao()
   {
-   return PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == (long)InpMagic;
+   ulong t[];
+   if(ListarPosicoes(t) == 0)
+      return false;
+   return PositionSelectByTicket(t[0]);
+  }
+
+void FecharPosicoes()
+  {
+   ulong t[];
+   int n = ListarPosicoes(t);
+   for(int i = 0; i < n; i++)
+      trade.PositionClose(t[i]);
+  }
+
+// muda o stop de todas as posições do robô, mantendo o alvo de cada uma
+bool MudarStop(double sl)
+  {
+   ulong t[];
+   int n = ListarPosicoes(t);
+   bool ok = n > 0;
+   for(int i = 0; i < n; i++)
+      if(PositionSelectByTicket(t[i]))
+         ok = trade.PositionModify(t[i], sl, PositionGetDouble(POSITION_TP)) && ok;
+   return ok;
+  }
+
+// preço médio e volume total das posições do robô
+double PrecoMedio(double &volTotal)
+  {
+   ulong t[];
+   int n = ListarPosicoes(t);
+   double pv = 0;
+   volTotal = 0;
+   for(int i = 0; i < n; i++)
+      if(PositionSelectByTicket(t[i]))
+        {
+         double v = PositionGetDouble(POSITION_VOLUME);
+         volTotal += v;
+         pv += v * PositionGetDouble(POSITION_PRICE_OPEN);
+        }
+   return (volTotal > 0) ? pv / volTotal : 0;
+  }
+
+// ajusta o lote ao mínimo, máximo e passo da corretora
+double Lote(double l)
+  {
+   double mn = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double mx = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double st = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(st <= 0)
+      st = mn;
+   l = MathFloor(l / st + 1e-9) * st;
+   return NormalizeDouble(MathMax(mn, MathMin(mx, l)), 2);
   }
 
 bool TemOrdem()
@@ -574,12 +689,33 @@ void Zerar()
       trade.OrderDelete(g_ordem);
    g_ordem = 0;
    if(TemPosicao())
-      trade.PositionClose(_Symbol);
+      FecharPosicoes();
   }
 
 //+------------------------------------------------------------------+
 //| Envia ordem stop de entrada                                       |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Envia a entrada: limitada (padrão) ou stop                        |
+//+------------------------------------------------------------------+
+bool EnviarEntrada(int dir, double lote, double preco, double sl, double tp, string cmt)
+  {
+   if(InpTipoOrdem == ENTRADA_LIMITE)
+     {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // o preço já está no limite ou melhor: entra a mercado
+      if(dir > 0 && ask <= preco)
+         return trade.Buy(lote, _Symbol, 0, sl, tp, cmt);
+      if(dir < 0 && bid >= preco)
+         return trade.Sell(lote, _Symbol, 0, sl, tp, cmt);
+      return (dir > 0) ? trade.BuyLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, cmt)
+                       : trade.SellLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, cmt);
+     }
+   return (dir > 0) ? trade.BuyStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, cmt)
+                    : trade.SellStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, cmt);
+  }
+
 void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string nome)
   {
    // filtro de tendência: VWAP precisa estar inclinada a favor (sem dados suficientes, não opera)
@@ -602,8 +738,12 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       double ref = (InpModoStop == STOP_BARRA) ? r[0].high : MathMax(extremo, nivel);
       sl = Arred(ref + Pts(InpFolgaStop));
      }
+   if(InpTipoOrdem == ENTRADA_LIMITE)
+      entrada = Arred(r[0].close - dir * Pts(InpOffsetLimite));
+   if(InpFixo)
+      sl = Arred(entrada - dir * Pts(InpStopFixo));
    double risco = dir * (entrada - sl);
-   if(risco <= 0 || risco > Pts(InpStopMax))
+   if(risco <= 0 || (!InpFixo && risco > Pts(InpStopMax)))
      {
       PrintFormat("%s ignorado: risco %.0f pts fora do limite", nome, risco / _Point);
       return;
@@ -611,8 +751,13 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
 
    double a1, a2;
    Alvos(dir, entrada, risco, a1, a2);
+   if(InpFixo)
+     {
+      a1 = 0;                                   // sem parcial
+      a2 = Arred(entrada + dir * Pts(InpAlvoFixo));
+     }
    double rr = dir * (a2 - entrada) / risco;
-   if(rr < InpRRMin)
+   if(!InpFixo && rr < InpRRMin)
      {
       PrintFormat("%s ignorado: R:R %.2f abaixo do mínimo", nome, rr);
       return;
@@ -621,16 +766,14 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
    // não persegue preço: se já passou do ponto de entrada, deixa ir
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada))
+   if(InpTipoOrdem == ENTRADA_STOP && ((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada)))
      {
       PrintFormat("%s ignorado: preço já passou da entrada", nome);
       return;
      }
 
-   double lote = InpLotes;
-   bool ok = (dir > 0)
-             ? trade.BuyStop(lote, entrada, _Symbol, sl, a2, ORDER_TIME_DAY, 0, "W20 " + nome)
-             : trade.SellStop(lote, entrada, _Symbol, sl, a2, ORDER_TIME_DAY, 0, "W20 " + nome);
+   double lote = Lote(InpLotes);
+   bool ok = EnviarEntrada(dir, lote, entrada, sl, a2, "W20 " + nome);
    if(ok && trade.ResultOrder() > 0)
      {
       g_ordem        = trade.ResultOrder();
@@ -639,7 +782,7 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       g_entrada      = entrada;
       g_alvo1        = a1;
       g_parcialFeita = false;
-      PrintFormat("%s: %s stop %.0f | SL %.0f | alvo1 %.0f | alvo2 %.0f | R:R %.2f",
+      PrintFormat("%s: %s em %.0f | SL %.0f | alvo1 %.0f | alvo2 %.0f | R:R %.2f",
                   nome, dir > 0 ? "compra" : "venda", entrada, sl, a1, a2, rr);
      }
    else
@@ -758,6 +901,32 @@ void NovaBarra()
 //+------------------------------------------------------------------+
 //| Gestão da posição a cada tick (barato: só compara preços)         |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Trailing: depois de X pontos a favor, o stop acompanha o preço a  |
+//| uma distância fixa e só anda a favor                              |
+//+------------------------------------------------------------------+
+void GerirTrailing()
+  {
+   if(!InpTrailing)
+      return;
+   ulong t[];
+   int n = ListarPosicoes(t);
+   for(int i = 0; i < n; i++)
+     {
+      if(!PositionSelectByTicket(t[i]))
+         continue;
+      int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? +1 : -1;
+      double abertura = PositionGetDouble(POSITION_PRICE_OPEN);
+      double preco = (dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      if(dir * (preco - abertura) < Pts(InpTrailAtivar))
+         continue;
+      double novo = Arred(preco - dir * Pts(InpTrailDist));
+      double sl = PositionGetDouble(POSITION_SL);
+      if(sl == 0 || dir * (novo - sl) >= Tick())
+         trade.PositionModify(t[i], novo, PositionGetDouble(POSITION_TP));
+     }
+  }
+
 void GerirPosicao()
   {
    if(!TemPosicao())
@@ -779,15 +948,11 @@ void GerirPosicao()
    double vol    = PositionGetDouble(POSITION_VOLUME);
    double passo  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double parc   = MathFloor(vol * InpParcialPct / 100.0 / passo) * passo;
-   if(parc >= passo && parc < vol)
+   if(parc >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) && parc < vol)
       trade.PositionClosePartial(ticket, parc);
 
    // primeiro nível operacional atingido: protege no zero a zero
-   if(PositionSelect(_Symbol))
-     {
-      double tp = PositionGetDouble(POSITION_TP);
-      trade.PositionModify(_Symbol, Arred(g_entrada), tp);
-     }
+   MudarStop(Arred(g_entrada));
    g_parcialFeita = true;
   }
 
@@ -803,13 +968,17 @@ void OnTick()
       NovoDia();
      }
 
-   if(MinutosAgora() >= Minutos(InpZerar))
+   MqlDateTime agoraDt;
+   TimeToStruct(TimeCurrent(), agoraDt);
+   bool diaDeZerar = InpZerarFimDia || (InpZerarSexta && agoraDt.day_of_week == 5);
+   if(diaDeZerar && MinutosAgora() >= Minutos(InpZerar))
      {
       Zerar();
       return;
      }
 
    GerirPosicao();
+   GerirTrailing();
 
    datetime barra = iTime(_Symbol, InpTFGatilho, 0);
    if(barra != g_ultimaBarra)
