@@ -54,7 +54,9 @@ input double          InpFatorVolume      = 1.3;        // Volume da barra >= fa
 input double          InpTercoFech        = 0.33;       // Fechamento no terço extremo (0.33)
 input bool            InpUsarDelta        = false;      // Exigir delta de agressão (forex não tem: deixe desligado)
 input double          InpDeltaMinPct      = 10;         // Delta mínimo (% do volume agredido)
-input bool            InpExigirAbsorcao   = false;      // Exigir absorção antes do gatilho
+input bool            InpExigirAbsorcao   = true;       // Exigir absorção antes do gatilho
+input double          InpFatorAbsorcao    = 1.3;        // Absorção: volume >= fator x média
+input double          InpPavioMin         = 0.4;        // Absorção: pavio de rejeição >= fração do range
 input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva
 
 input group "Stop e alvo fixos"
@@ -408,27 +410,49 @@ bool BarraIntencao(const MqlRates &r[], int i, int dir)
   }
 
 //+------------------------------------------------------------------+
-//| Absorção: barra com agressão forte contra nós que não andou       |
-//| (compra: delta vendedor e fechamento na metade de cima)           |
+//| Absorção antes do gatilho: barra perto do nível, com volume alto, |
+//| que não conseguiu seguir contra nós. Na compra: pavio inferior    |
+//| grande e fechamento na metade de cima (vendas absorvidas por      |
+//| ordens limitadas). No forex não há delta, então vale preço +      |
+//| volume de ticks; se houver delta, exige também agressão contra.   |
 //+------------------------------------------------------------------+
-bool Absorcao(const MqlRates &r[], int de, int ate, int dir)
+bool Absorcao(const MqlRates &r[], int de, int ate, int dir, double nivel)
   {
+   double tol = Pts(InpTolerancia), pen = Pts(InpPenetracaoMax);
    for(int i = de; i <= ate; i++)
      {
       double range = r[i].high - r[i].low;
       if(range <= 0)
          continue;
-      double pos = (r[i].close - r[i].low) / range;
-      double d, va;
-      if(!DeltaBarra(r[i].time, d, va))
+      bool perto = (dir > 0) ? (r[i].low  <= nivel + tol && r[i].low  >= nivel - pen)
+                             : (r[i].high >= nivel - tol && r[i].high <= nivel + pen);
+      if(!perto)
          continue;
-      bool agressaoContra = (-dir * d) >= InpDeltaMinPct / 100.0 * va;
+
+      double somaV = 0;
+      for(int k = i + 1; k <= i + InpMediaN; k++)
+         somaV += VolumeBarra(r[k]);
+      if(VolumeBarra(r[i]) < InpFatorAbsorcao * somaV / InpMediaN)
+         continue;
+
+      double pos   = (r[i].close - r[i].low) / range;
+      double pavio = (dir > 0) ? (MathMin(r[i].open, r[i].close) - r[i].low) / range
+                               : (r[i].high - MathMax(r[i].open, r[i].close)) / range;
       bool naoAndou = (dir > 0) ? (pos >= 0.5) : (pos <= 0.5);
-      if(agressaoContra && naoAndou)
-         return true;
+      if(!naoAndou || pavio < InpPavioMin)
+         continue;
+
+      if(InpUsarDelta && g_deltaDisponivel)
+        {
+         double d, va;
+         if(DeltaBarra(r[i].time, d, va) && (-dir * d) < InpDeltaMinPct / 100.0 * va)
+            continue;
+        }
+      return true;
      }
    return false;
   }
+
 
 //+------------------------------------------------------------------+
 //| Procura teste do nível + gatilho. Retorna true e preenche extremo |
@@ -468,7 +492,8 @@ bool Setup(const MqlRates &r[], int nHoje, double nivel, int dir, double &extrem
       if(!valido)
          continue;
 
-      if(InpExigirAbsorcao && g_deltaDisponivel && !Absorcao(r, 0, t, dir))
+      // absorção nas barras antes do gatilho (do teste até a barra anterior à SOS/SOW)
+      if(InpExigirAbsorcao && !Absorcao(r, 1, MathMax(t, 1), dir, nivel))
          continue;
       return true;
      }

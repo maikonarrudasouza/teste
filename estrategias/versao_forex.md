@@ -16,7 +16,7 @@ Arquivos: `estrategias/Wyckoff20_FX.mq5` e `estrategias/TapeReading_FX.mq5`. A l
 ## Limitações
 
 - O Wyckoff 2.0 usa o perfil do "dia" que começa à meia-noite do servidor, incluindo a sessão asiática. É uma aproximação razoável, mas o volume de ticks não é o volume real negociado.
-- Sem delta, o setup de absorção (`InpExigirAbsorcao`) não funciona. Os gatilhos ficam só com preço e volume de ticks, que é mais fraco que a leitura de agressão do WIN.
+- Sem delta, os gatilhos ficam só com preço e volume de ticks, que é mais fraco que a leitura de agressão do WIN.
 - O spread (normalmente 0,5 a 1,5 pip) pesa mais no Tape Reading em M1, que trabalha com stops curtos. Teste primeiro com spread real.
 
 Teste no testador com "Cada tick baseado em ticks reais", comece em conta demo e use números mágicos diferentes das versões WIN (já vêm diferentes).
@@ -29,3 +29,14 @@ Os dois robôs de forex vêm com `InpFixo = true`: a ordem já sai com stop e al
 - TapeReading_FX: stop de 100 pontos (10 pips) e alvo de 200 (20 pips). O zero a zero, os aumentos de mão, o stop móvel, a saída por volume contra e a virada de mão ficam desligados.
 
 Com `InpFixo = false` volta a gestão original.
+
+## Absorção antes do gatilho (Wyckoff20_FX)
+
+`InpExigirAbsorcao = true` por padrão. Antes da barra SOS/SOW, precisa existir pelo menos uma barra perto do nível testado com:
+- volume ≥ 1,3 × média (`InpFatorAbsorcao`);
+- pavio de rejeição ≥ 40% do range (`InpPavioMin`): pavio inferior na compra, superior na venda;
+- fechamento na metade a favor: vendeu forte e não conseguiu fechar embaixo.
+
+Como o forex não tem delta, a absorção é lida por volume de ticks + pavio. Se a corretora tiver delta e `InpUsarDelta` estiver ligado, exige também agressão contra nessa barra.
+
+No TapeReading_FX, o setup de clímax já é uma absorção por definição (volume muito alto sem progresso), então não precisou de filtro novo.
