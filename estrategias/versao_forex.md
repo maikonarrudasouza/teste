@@ -53,6 +53,6 @@ No TapeReading_FX, o setup de clímax já é uma absorção por definição (vol
 
 ## Fechamento no fim do dia
 
-Antes os robôs de forex zeravam tudo às 23:30 do servidor, todo dia. Em H1, com stop e alvo de 50 pips, a operação quase nunca chegava a um dos dois antes disso e era fechada no meio do caminho, normalmente no negativo. Agora:
-- `InpZerarFimDia = false`: não zera todo dia; quem fecha a posição é o stop ou o alvo.
-- `InpZerarSexta = true`: zera na sexta às 23:30 (`InpZerar`), para não carregar gap de fim de semana.
+Os robôs de forex zeram tudo às 23:30 do servidor (`InpZerar`), todo dia (`InpZerarFimDia = true`). O maikon prefere assim: a operação que não chegou no stop nem no alvo é encerrada no fim do dia, normalmente com perda menor que o stop cheio.
+- `InpZerarFimDia = false`: não zera todo dia; quem fecha é o stop ou o alvo.
+- `InpZerarSexta = true`: com o anterior desligado, ainda zera na sexta para não carregar o fim de semana.
