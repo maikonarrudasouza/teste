@@ -54,7 +54,7 @@ input double          InpFatorVolume      = 1.3;        // Volume da barra >= fa
 input double          InpTercoFech        = 0.33;       // Fechamento no terço extremo (0.33)
 input bool            InpUsarDelta        = false;      // Exigir delta de agressão (forex não tem: deixe desligado)
 input double          InpDeltaMinPct      = 10;         // Delta mínimo (% do volume agredido)
-input bool            InpExigirAbsorcao   = true;       // Exigir absorção antes do gatilho
+input bool            InpExigirAbsorcao   = false;      // Exigir absorção antes do gatilho
 input double          InpFatorAbsorcao    = 1.3;        // Absorção: volume >= fator x média
 input double          InpPavioMin         = 0.4;        // Absorção: pavio de rejeição >= fração do range
 input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva

@@ -32,7 +32,7 @@ Com `InpFixo = false` volta a gestão original.
 
 ## Absorção antes do gatilho (Wyckoff20_FX)
 
-`InpExigirAbsorcao = true` por padrão. Antes da barra SOS/SOW, precisa existir pelo menos uma barra perto do nível testado com:
+`InpExigirAbsorcao` vem desligado (piorou no backtest do maikon em 13/10). Ligue para testar. Antes da barra SOS/SOW, precisa existir pelo menos uma barra perto do nível testado com:
 - volume ≥ 1,3 × média (`InpFatorAbsorcao`);
 - pavio de rejeição ≥ 40% do range (`InpPavioMin`): pavio inferior na compra, superior na venda;
 - fechamento na metade a favor: vendeu forte e não conseguiu fechar embaixo.
