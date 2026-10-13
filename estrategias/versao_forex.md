@@ -50,3 +50,9 @@ No TapeReading_FX, o setup de clímax já é uma absorção por definição (vol
 `InpTipoOrdem = ENTRADA_LIMITE`: no fechamento da barra de sinal, o robô coloca uma ordem limitada 10 pontos (1 pip, `InpOffsetLimite`) melhor que o fechamento: compra abaixo, venda acima. A ordem fica viva por 8 barras (`InpValidadeOrdem`) e depois é cancelada. Se o preço já estiver no limite ou melhor na hora do envio, entra a mercado. Com stop e alvo fixos, eles são medidos a partir do preço da limitada.
 
 `ENTRADA_STOP` volta ao comportamento anterior (rompimento da barra).
+
+## Fechamento no fim do dia
+
+Antes os robôs de forex zeravam tudo às 23:30 do servidor, todo dia. Em H1, com stop e alvo de 50 pips, a operação quase nunca chegava a um dos dois antes disso e era fechada no meio do caminho, normalmente no negativo. Agora:
+- `InpZerarFimDia = false`: não zera todo dia; quem fecha a posição é o stop ou o alvo.
+- `InpZerarSexta = true`: zera na sexta às 23:30 (`InpZerar`), para não carregar gap de fim de semana.

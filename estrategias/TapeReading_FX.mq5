@@ -34,7 +34,9 @@ input ENUM_TIMEFRAMES InpTF               = PERIOD_M1;  // Tempo gráfico da lei
 input group "Horário (hora do servidor)"
 input string          InpInicio           = "10:00";    // Início das entradas (abertura de Londres em servidor GMT+3)
 input string          InpFimEntradas      = "19:00";    // Fim das entradas
-input string          InpZerar            = "23:30";    // Zerar tudo (não dorme posicionado)
+input string          InpZerar            = "23:30";    // Hora de zerar (só vale com as opções abaixo)
+input bool            InpZerarFimDia      = false;      // Zerar todo dia (desligado: stop e alvo trabalham sozinhos)
+input bool            InpZerarSexta       = true;       // Zerar na sexta, para não carregar o fim de semana
 
 input group "Volume"
 input int             InpMediaN           = 30;         // Barras para a média de volume e range
@@ -752,7 +754,10 @@ void OnTick()
       g_deltaOk = true;
      }
 
-   if(MinutosAgora() >= Minutos(InpZerar))
+   MqlDateTime agoraDt;
+   TimeToStruct(TimeCurrent(), agoraDt);
+   bool diaDeZerar = InpZerarFimDia || (InpZerarSexta && agoraDt.day_of_week == 5);
+   if(diaDeZerar && MinutosAgora() >= Minutos(InpZerar))
      {
       Zerar();
       return;

@@ -37,7 +37,9 @@ input ENUM_TIMEFRAMES InpTFGatilho        = PERIOD_M5;  // Tempo gráfico do gat
 input group "Horário (hora do servidor)"
 input string          InpInicio           = "10:00";    // Início das entradas (abertura de Londres em servidor GMT+3)
 input string          InpFimEntradas      = "19:00";    // Fim das entradas
-input string          InpZerar            = "23:30";    // Zerar tudo
+input string          InpZerar            = "23:30";    // Hora de zerar (só vale com as opções abaixo)
+input bool            InpZerarFimDia      = false;      // Zerar todo dia (desligado: stop e alvo trabalham sozinhos)
+input bool            InpZerarSexta       = true;       // Zerar na sexta, para não carregar o fim de semana
 
 input group "Perfil de volume"
 input int             InpPassoPerfil      = 10;         // Tamanho de cada faixa do perfil (pontos; 10 = 1 pip)
@@ -935,7 +937,10 @@ void OnTick()
       NovoDia();
      }
 
-   if(MinutosAgora() >= Minutos(InpZerar))
+   MqlDateTime agoraDt;
+   TimeToStruct(TimeCurrent(), agoraDt);
+   bool diaDeZerar = InpZerarFimDia || (InpZerarSexta && agoraDt.day_of_week == 5);
+   if(diaDeZerar && MinutosAgora() >= Minutos(InpZerar))
      {
       Zerar();
       return;
