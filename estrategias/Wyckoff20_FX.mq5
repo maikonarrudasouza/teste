@@ -17,6 +17,12 @@
 
 #include <Trade/Trade.mqh>
 
+enum ENUM_TIPO_ORDEM
+  {
+   ENTRADA_LIMITE = 0,  // Limitada (X pontos melhor que o fechamento do sinal)
+   ENTRADA_STOP   = 1   // Stop (rompimento da barra de sinal)
+  };
+
 enum ENUM_MODO_STOP
   {
    STOP_BARRA = 0,   // Do outro lado da barra de gatilho
@@ -60,7 +66,9 @@ input double          InpDeltaMinPct      = 10;         // Delta mínimo (% do v
 input bool            InpExigirAbsorcao   = false;      // Exigir absorção antes do gatilho
 input double          InpFatorAbsorcao    = 1.3;        // Absorção: volume >= fator x média
 input double          InpPavioMin         = 0.4;        // Absorção: pavio de rejeição >= fração do range
-input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva
+input ENUM_TIPO_ORDEM InpTipoOrdem        = ENTRADA_LIMITE; // Tipo da ordem de entrada
+input int             InpOffsetLimite     = 10;         // Limitada: pontos melhor que o fechamento (10 = 1 pip)
+input int             InpValidadeOrdem    = 8;          // Barras que a ordem pendente fica viva
 
 input group "Stop e alvo fixos"
 input bool            InpFixo             = true;       // Usar stop e alvo fixos (desliga parcial e alvos por nível)
@@ -680,6 +688,27 @@ void Zerar()
 //+------------------------------------------------------------------+
 //| Envia ordem stop de entrada                                       |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Envia a entrada: limitada (padrão) ou stop                        |
+//+------------------------------------------------------------------+
+bool EnviarEntrada(int dir, double lote, double preco, double sl, double tp, string cmt)
+  {
+   if(InpTipoOrdem == ENTRADA_LIMITE)
+     {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // o preço já está no limite ou melhor: entra a mercado
+      if(dir > 0 && ask <= preco)
+         return trade.Buy(lote, _Symbol, 0, sl, tp, cmt);
+      if(dir < 0 && bid >= preco)
+         return trade.Sell(lote, _Symbol, 0, sl, tp, cmt);
+      return (dir > 0) ? trade.BuyLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                       : trade.SellLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt);
+     }
+   return (dir > 0) ? trade.BuyStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                    : trade.SellStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt);
+  }
+
 void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string nome)
   {
    // filtro de tendência: VWAP precisa estar inclinada a favor (sem dados suficientes, não opera)
@@ -702,6 +731,8 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       double ref = (InpModoStop == STOP_BARRA) ? r[0].high : MathMax(extremo, nivel);
       sl = Arred(ref + Pts(InpFolgaStop));
      }
+   if(InpTipoOrdem == ENTRADA_LIMITE)
+      entrada = Arred(r[0].close - dir * Pts(InpOffsetLimite));
    if(InpFixo)
       sl = Arred(entrada - dir * Pts(InpStopFixo));
    double risco = dir * (entrada - sl);
@@ -728,16 +759,14 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
    // não persegue preço: se já passou do ponto de entrada, deixa ir
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada))
+   if(InpTipoOrdem == ENTRADA_STOP && ((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada)))
      {
       PrintFormat("%s ignorado: preço já passou da entrada", nome);
       return;
      }
 
    double lote = Lote(InpLotes);
-   bool ok = (dir > 0)
-             ? trade.BuyStop(lote, entrada, _Symbol, sl, a2, ORDER_TIME_GTC, 0, "W20 " + nome)
-             : trade.SellStop(lote, entrada, _Symbol, sl, a2, ORDER_TIME_GTC, 0, "W20 " + nome);
+   bool ok = EnviarEntrada(dir, lote, entrada, sl, a2, "W20 " + nome);
    if(ok && trade.ResultOrder() > 0)
      {
       g_ordem        = trade.ResultOrder();
@@ -746,7 +775,7 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       g_entrada      = entrada;
       g_alvo1        = a1;
       g_parcialFeita = false;
-      PrintFormat("%s: %s stop %.5f | SL %.5f | alvo1 %.5f | alvo2 %.5f | R:R %.2f",
+      PrintFormat("%s: %s em %.5f | SL %.5f | alvo1 %.5f | alvo2 %.5f | R:R %.2f",
                   nome, dir > 0 ? "compra" : "venda", entrada, sl, a1, a2, rr);
      }
    else

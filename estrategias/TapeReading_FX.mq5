@@ -20,6 +20,12 @@
 
 #include <Trade/Trade.mqh>
 
+enum ENUM_TIPO_ORDEM
+  {
+   ENTRADA_LIMITE = 0,  // Limitada (X pontos melhor que o fechamento do sinal)
+   ENTRADA_STOP   = 1   // Stop (rompimento da barra de sinal)
+  };
+
 input group "Geral"
 input ulong           InpMagic            = 191011;     // Número mágico
 input double          InpLotes            = 0.10;       // Lotes na entrada inicial
@@ -69,7 +75,9 @@ input int             InpMaxAumentos      = 2;          // Máximo de aumentos (
 input int             InpTrailN           = 5;          // Stop móvel na mín/máx das últimas N barras
 input double          InpFatorSaida       = 2.0;        // Sai se volume >= fator x média contra a posição
 input bool            InpVirarMao         = true;       // Vira a mão no clímax oposto
-input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva
+input ENUM_TIPO_ORDEM InpTipoOrdem        = ENTRADA_LIMITE; // Tipo da ordem de entrada
+input int             InpOffsetLimite     = 10;         // Limitada: pontos melhor que o fechamento (10 = 1 pip)
+input int             InpValidadeOrdem    = 8;          // Barras que a ordem pendente fica viva
 
 input group "Limites do dia"
 input int             InpMaxOperacoesDia  = 6;          // Máximo de entradas por dia (evita overtrading)
@@ -83,6 +91,7 @@ datetime g_ultimaBarra = 0;
 datetime g_dia         = 0;
 bool     g_deltaOk     = true;
 datetime g_climaxUsado = 0;
+double   g_ultimoFech  = 0;     // fechamento da última barra fechada (base da limitada)
 
 ulong    g_ordem       = 0;
 int      g_ordemBarras = 0;
@@ -492,8 +501,31 @@ void Zerar()
 //+------------------------------------------------------------------+
 //| Envia ordem stop de entrada                                       |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Envia a entrada: limitada (padrão) ou stop                        |
+//+------------------------------------------------------------------+
+bool EnviarEntrada(int dir, double lote, double preco, double sl, double tp, string cmt)
+  {
+   if(InpTipoOrdem == ENTRADA_LIMITE)
+     {
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // o preço já está no limite ou melhor: entra a mercado
+      if(dir > 0 && ask <= preco)
+         return trade.Buy(lote, _Symbol, 0, sl, tp, cmt);
+      if(dir < 0 && bid >= preco)
+         return trade.Sell(lote, _Symbol, 0, sl, tp, cmt);
+      return (dir > 0) ? trade.BuyLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                       : trade.SellLimit(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt);
+     }
+   return (dir > 0) ? trade.BuyStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt)
+                    : trade.SellStop(lote, preco, _Symbol, sl, tp, ORDER_TIME_GTC, 0, cmt);
+  }
+
 bool Entrar(int dir, double entrada, double stop, string nome)
   {
+   if(InpTipoOrdem == ENTRADA_LIMITE && g_ultimoFech > 0)
+      entrada = Arred(g_ultimoFech - dir * Pts(InpOffsetLimite));
    if(InpFixo)
       stop = Arred(entrada - dir * Pts(InpStopFixo));
    double risco = dir * (entrada - stop);
@@ -510,7 +542,7 @@ bool Entrar(int dir, double entrada, double stop, string nome)
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada))
+   if(InpTipoOrdem == ENTRADA_STOP && ((dir > 0 && ask >= entrada) || (dir < 0 && bid <= entrada)))
      {
       PrintFormat("%s ignorado: preço já passou da entrada", nome);
       return false;
@@ -518,9 +550,7 @@ bool Entrar(int dir, double entrada, double stop, string nome)
 
    double alvo = InpFixo ? Arred(entrada + dir * Pts(InpAlvoFixo))
                  : (InpAlvoR > 0) ? Arred(entrada + dir * InpAlvoR * risco) : 0;
-   bool ok = (dir > 0)
-             ? trade.BuyStop(Lote(InpLotes), entrada, _Symbol, stop, alvo, ORDER_TIME_GTC, 0, "TR " + nome)
-             : trade.SellStop(Lote(InpLotes), entrada, _Symbol, stop, alvo, ORDER_TIME_GTC, 0, "TR " + nome);
+   bool ok = EnviarEntrada(dir, Lote(InpLotes), entrada, stop, alvo, "TR " + nome);
    if(!ok || trade.ResultOrder() == 0)
      {
       PrintFormat("%s: falha ao enviar ordem (%u %s)", nome, trade.ResultRetcode(), trade.ResultRetcodeDescription());
@@ -533,7 +563,7 @@ bool Entrar(int dir, double entrada, double stop, string nome)
    g_risco       = risco;
    g_aumentos    = 0;
    g_noZero      = false;
-   PrintFormat("%s: %s stop %.5f | SL %.5f | alvo %.5f | risco %.0f pts",
+   PrintFormat("%s: %s em %.5f | SL %.5f | alvo %.5f | risco %.0f pts",
                nome, dir > 0 ? "compra" : "venda", entrada, stop, alvo, risco / _Point);
    return true;
   }
@@ -644,6 +674,7 @@ void NovaBarra()
    ArraySetAsSeries(ema, true);
    if(CopyBuffer(g_ema, 0, 1, InpRecuoMax + 5, ema) < InpRecuoMax + 5)
       return;
+   g_ultimoFech = r[0].close;
 
    bool saiu = GerirBarra(r);
 

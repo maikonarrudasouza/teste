@@ -44,3 +44,9 @@ No TapeReading_FX, o setup de clímax já é uma absorção por definição (vol
 ## Filtro de direção da VWAP (padrão ligado, também no Wyckoff20_WIN)
 
 `InpFiltroVWAP = true`: só compra se a VWAP do dia estiver subindo e só vende se estiver caindo. A inclinação é a VWAP atual menos a VWAP de 6 barras atrás (`InpVwapBarras`). `InpVwapMinPts` exige uma inclinação mínima, e 0 significa qualquer subida ou descida. Vale para todos os setups (VAL, VAH, continuação e recuo na VWAP).
+
+## Entrada com ordem limitada (padrão nos dois robôs de forex)
+
+`InpTipoOrdem = ENTRADA_LIMITE`: no fechamento da barra de sinal, o robô coloca uma ordem limitada 10 pontos (1 pip, `InpOffsetLimite`) melhor que o fechamento: compra abaixo, venda acima. A ordem fica viva por 8 barras (`InpValidadeOrdem`) e depois é cancelada. Se o preço já estiver no limite ou melhor na hora do envio, entra a mercado. Com stop e alvo fixos, eles são medidos a partir do preço da limitada.
+
+`ENTRADA_STOP` volta ao comportamento anterior (rompimento da barra).
