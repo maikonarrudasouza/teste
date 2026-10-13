@@ -20,3 +20,12 @@ Arquivos: `estrategias/Wyckoff20_FX.mq5` e `estrategias/TapeReading_FX.mq5`. A l
 - O spread (normalmente 0,5 a 1,5 pip) pesa mais no Tape Reading em M1, que trabalha com stops curtos. Teste primeiro com spread real.
 
 Teste no testador com "Cada tick baseado em ticks reais", comece em conta demo e use números mágicos diferentes das versões WIN (já vêm diferentes).
+
+## Stop e alvo fixos
+
+Os dois robôs de forex vêm com `InpFixo = true`: a ordem já sai com stop e alvo fixos e nada se move depois.
+
+- Wyckoff20_FX: stop de 150 pontos (15 pips) e alvo de 300 (30 pips). A parcial e os alvos por nível de volume ficam desligados.
+- TapeReading_FX: stop de 100 pontos (10 pips) e alvo de 200 (20 pips). O zero a zero, os aumentos de mão, o stop móvel, a saída por volume contra e a virada de mão ficam desligados.
+
+Com `InpFixo = false` volta a gestão original.

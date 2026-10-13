@@ -57,6 +57,11 @@ input double          InpDeltaMinPct      = 10;         // Delta mínimo (% do v
 input bool            InpExigirAbsorcao   = false;      // Exigir absorção antes do gatilho
 input int             InpValidadeOrdem    = 2;          // Barras que a ordem stop fica viva
 
+input group "Stop e alvo fixos"
+input bool            InpFixo             = true;       // Usar stop e alvo fixos (desliga parcial e alvos por nível)
+input int             InpStopFixo         = 150;        // Stop fixo (pontos; 150 = 15 pips)
+input int             InpAlvoFixo         = 300;        // Alvo fixo (pontos; 300 = 30 pips)
+
 input group "Risco e alvos"
 input ENUM_MODO_STOP  InpModoStop         = STOP_BARRA; // Onde fica o stop
 input int             InpFolgaStop        = 20;         // Folga além do stop (pontos)
@@ -651,8 +656,10 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       double ref = (InpModoStop == STOP_BARRA) ? r[0].high : MathMax(extremo, nivel);
       sl = Arred(ref + Pts(InpFolgaStop));
      }
+   if(InpFixo)
+      sl = Arred(entrada - dir * Pts(InpStopFixo));
    double risco = dir * (entrada - sl);
-   if(risco <= 0 || risco > Pts(InpStopMax))
+   if(risco <= 0 || (!InpFixo && risco > Pts(InpStopMax)))
      {
       PrintFormat("%s ignorado: risco %.0f pts fora do limite", nome, risco / _Point);
       return;
@@ -660,8 +667,13 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
 
    double a1, a2;
    Alvos(dir, entrada, risco, a1, a2);
+   if(InpFixo)
+     {
+      a1 = 0;                                   // sem parcial
+      a2 = Arred(entrada + dir * Pts(InpAlvoFixo));
+     }
    double rr = dir * (a2 - entrada) / risco;
-   if(rr < InpRRMin)
+   if(!InpFixo && rr < InpRRMin)
      {
       PrintFormat("%s ignorado: R:R %.2f abaixo do mínimo", nome, rr);
       return;
@@ -688,7 +700,7 @@ void Entrar(const MqlRates &r[], int dir, double nivel, double extremo, string n
       g_entrada      = entrada;
       g_alvo1        = a1;
       g_parcialFeita = false;
-      PrintFormat("%s: %s stop %.0f | SL %.0f | alvo1 %.0f | alvo2 %.0f | R:R %.2f",
+      PrintFormat("%s: %s stop %.5f | SL %.5f | alvo1 %.5f | alvo2 %.5f | R:R %.2f",
                   nome, dir > 0 ? "compra" : "venda", entrada, sl, a1, a2, rr);
      }
    else

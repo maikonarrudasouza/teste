@@ -53,6 +53,11 @@ input double          InpFatorRecuo       = 0.8;        // Volume médio do recu
 input double          InpFatorGatilho     = 1.0;        // Volume da barra de retomada >= fator x média
 input double          InpDeltaMinPct      = 10;         // Delta mínimo a favor (% do volume agredido)
 
+input group "Stop e alvo fixos"
+input bool            InpFixo             = true;       // Usar stop e alvo fixos (desliga zero a zero, aumentos, stop móvel e saídas antecipadas)
+input int             InpStopFixo         = 100;        // Stop fixo (pontos; 100 = 10 pips)
+input int             InpAlvoFixo         = 200;        // Alvo fixo (pontos; 200 = 20 pips)
+
 input group "Gestão"
 input int             InpFolgaStop        = 10;         // Folga além do stop (pontos)
 input int             InpStopMin          = 50;         // Stop mínimo (pontos)
@@ -489,13 +494,15 @@ void Zerar()
 //+------------------------------------------------------------------+
 bool Entrar(int dir, double entrada, double stop, string nome)
   {
+   if(InpFixo)
+      stop = Arred(entrada - dir * Pts(InpStopFixo));
    double risco = dir * (entrada - stop);
-   if(risco < Pts(InpStopMin))
+   if(!InpFixo && risco < Pts(InpStopMin))
      {
       stop = Arred(entrada - dir * Pts(InpStopMin));
       risco = Pts(InpStopMin);
      }
-   if(risco > Pts(InpStopMax))
+   if(!InpFixo && risco > Pts(InpStopMax))
      {
       PrintFormat("%s ignorado: stop de %.0f pts acima do máximo", nome, risco / _Point);
       return false;
@@ -509,7 +516,8 @@ bool Entrar(int dir, double entrada, double stop, string nome)
       return false;
      }
 
-   double alvo = (InpAlvoR > 0) ? Arred(entrada + dir * InpAlvoR * risco) : 0;
+   double alvo = InpFixo ? Arred(entrada + dir * Pts(InpAlvoFixo))
+                 : (InpAlvoR > 0) ? Arred(entrada + dir * InpAlvoR * risco) : 0;
    bool ok = (dir > 0)
              ? trade.BuyStop(Lote(InpLotes), entrada, _Symbol, stop, alvo, ORDER_TIME_GTC, 0, "TR " + nome)
              : trade.SellStop(Lote(InpLotes), entrada, _Symbol, stop, alvo, ORDER_TIME_GTC, 0, "TR " + nome);
@@ -525,7 +533,7 @@ bool Entrar(int dir, double entrada, double stop, string nome)
    g_risco       = risco;
    g_aumentos    = 0;
    g_noZero      = false;
-   PrintFormat("%s: %s stop %.0f | SL %.0f | alvo %.0f | risco %.0f pts",
+   PrintFormat("%s: %s stop %.5f | SL %.5f | alvo %.5f | risco %.0f pts",
                nome, dir > 0 ? "compra" : "venda", entrada, stop, alvo, risco / _Point);
    return true;
   }
@@ -539,6 +547,8 @@ void GerirTick()
       return;
    if(TemOrdem())
       CancelarOrdem();
+   if(InpFixo)
+      return;                                   // stop e alvo fixos: nada se move
 
    double preco = (g_dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double ganhoR = g_dir * (preco - g_entrada) / g_risco;
@@ -586,6 +596,9 @@ bool GerirBarra(const MqlRates &r[])
      }
    int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? +1 : -1;
    g_dir = dir;
+
+   if(InpFixo)
+      return false;                             // stop e alvo fixos: sem saída antecipada nem stop móvel
 
    // volume pesado contra a posição: sai na hora (Neill)
    double media = MediaVol(r, 0);
@@ -673,7 +686,7 @@ void NovaBarra()
      {
       for(int dir = +1; dir >= -1; dir -= 2)
         {
-         if(posicionado && (dir == dirPos || !InpVirarMao))
+         if(posicionado && (dir == dirPos || !InpVirarMao || InpFixo))
             continue;
          if(!SetupClimax(r, dir, e, s, tc))
             continue;
