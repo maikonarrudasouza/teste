@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.00"
+#property version     "1.01"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -42,11 +42,11 @@ input int             InpMediaN           = 30;         // Barras para medir o v
 input bool            InpExigirSustentar  = true;       // Barra precisa fechar acima (compra) do início da agressão
 
 input group "Entrada"
-input int             InpOffsetLimite     = 100;        // Limitada: pontos melhor que o fechamento da barra
+input int             InpOffsetLimite     = 110;        // Limitada: pontos melhor que o fechamento da barra
 input int             InpValidadeOrdem    = 2;          // Barras que a ordem limitada fica viva
 
 input group "Stop e alvo"
-input int             InpStopFixo         = 150;        // Stop (pontos)
+input int             InpStopFixo         = 125;        // Stop (pontos)
 input int             InpAlvoFixo         = 500;        // Gain (pontos)
 
 input group "Trailing stop"

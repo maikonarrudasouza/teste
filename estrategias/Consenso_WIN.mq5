@@ -57,6 +57,9 @@
 //|          votar) e se ha ticks de negocio com lado agressor.       |
 //|          Sem eles Delta/Fita/Agressao ficam parados.              |
 //|                                                                   |
+//|  v1.07 - padroes vindos dos .set dos robos avulsos (aa, delta,   |
+//|          fita, vp-breackot): Delta e Fita ficaram bem mais      |
+//|          folgados, para votarem mais vezes.                     |
 //|  v1.06 - InpTempoReal: o consenso passa a ser conferido a cada    |
 //|          segundo, nao so no fechamento da barra. Delta, VP e      |
 //|          Agressao continuam votando no fechamento (leem barras    |
@@ -65,7 +68,7 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.06"
+#property version   "1.07"
 
 #include <Trade\Trade.mqh>
 
@@ -92,8 +95,8 @@ input int        InpDistancia     = 200;    // Distancia da limite (pontos) - va
 input int        InpValidade4     = 4;      // Validade com 4 votos (barras)
 input int        InpValidade3     = 3;      // Validade com 3 votos (barras)
 input double     InpLots          = 1.0;    // Contratos
-input int        InpStopPoints    = 120;    // Stop (pontos)
-input int        InpTakePoints    = 75;     // Alvo (pontos)
+input int        InpStopPoints    = 125;    // Stop (pontos) - igual aos .set
+input int        InpTakePoints    = 250;    // Alvo (pontos) - os .set divergem, ver regras
 input bool       InpReverter      = true;   // 3+ votos contrarios: zera e vira
 input bool       InpTempoReal     = true;   // Checar o consenso a cada segundo (nao so no fechamento da barra)
 
@@ -122,10 +125,10 @@ input color      InpCorFundo      = C'22,22,26';       // Fundo
 //  FILTROS COMPARTILHADOS
 //==================================================================
 input group "Tendencia (Delta e Fita)"
-input ENUM_TIMEFRAMES T_TF       = PERIOD_M15;  // Timeframe da media
+input ENUM_TIMEFRAMES T_TF       = PERIOD_M5;   // Timeframe da media (.set: TFTendencia=5)
 input int             T_Periodo  = 50;          // Periodo da media
 input ENUM_MA_METHOD  T_Metodo   = MODE_EMA;    // Metodo da media
-input int             T_DistMin  = 50;          // Zona neutra (pontos)
+input int             T_DistMin  = 25;          // Zona neutra (pontos) - o mais folgado dos .set
 
 input group "Modo cauteloso (VP e Fita)"
 input int    C_JanelaMin = 30;    // Janela de leitura (minutos)
@@ -140,13 +143,13 @@ input group "Voto 1 - Delta_Fluxo"
 input bool   D_UsarDivergencia = true;   // Divergencia de delta
 input bool   D_UsarAbsorcao    = true;   // Absorcao
 input long   D_DeltaMinimo     = 400;    // Absorcao: delta minimo da barra
-input int    D_RangeMaximo     = 60;     // Absorcao: range maximo (pontos)
+input int    D_RangeMaximo     = 200;     // Absorcao: range maximo (pontos)
 input int    D_Lookback        = 60;     // Barras para procurar pivos
 input int    D_PivotK          = 2;      // Barras de cada lado do pivo
 input int    D_MaxPivotAge     = 5;      // Idade maxima do pivo recente
 input double D_MinPriceDiff    = 30;     // Diferenca minima de preco (pontos)
 input long   D_MinDeltaDiff    = 200;    // Diferenca minima de delta
-input bool   D_FiltroTend      = false;  // So a favor da media
+input bool   D_FiltroTend      = true;   // So a favor da media (.set delta_fluxo)
 
 //==================================================================
 //  VOTO 2 - FITA
@@ -158,19 +161,19 @@ input bool   F_UsarDesequil    = true;
 input int    F_MinSinais       = 2;      // Sinais internos que precisam concordar
 input int    F_JanelaSeg       = 15;     // Janela curta (s)
 input int    F_JanelaBaseSeg   = 600;    // Janela base da velocidade (s)
-input long   F_LoteGrande      = 50;
+input long   F_LoteGrande      = 30;
 input long   F_LoteTeto        = 1000;   // 0 = sem teto
 input long   F_VolGrandesMin   = 200;
-input double F_FatorVelocidade = 3.0;
-input int    F_MinNegocios     = 20;
-input double F_DesequilMin     = 0.60;
-input long   F_VolMinJanela    = 300;
+input double F_FatorVelocidade = 1.7;
+input int    F_MinNegocios     = 15;
+input double F_DesequilMin     = 0.45;
+input long   F_VolMinJanela    = 250;
 input bool   F_UsarAcumulado   = true;   // Barra sinal contra a variacao do acumulado
 input int    F_AcumJanelaSeg   = 600;
-input long   F_AcumMinimo      = 500;
-input bool   F_FiltroTend      = false;
-input int    F_SinaisIgnoraTend= 3;      // N sinais internos ignoram a tendencia (0 = nunca)
-input bool   F_UsarChop        = true;   // Modo cauteloso exige mais sinais
+input long   F_AcumMinimo      = 1000;
+input bool   F_FiltroTend      = true;   // .set fita
+input int    F_SinaisIgnoraTend= 2;      // N sinais internos ignoram a tendencia (0 = nunca)
+input bool   F_UsarChop        = false;  // Modo cauteloso exige mais sinais (.set fita: desligado)
 input int    F_ChopMinSinais   = 3;      // Sinais exigidos no modo cauteloso
 
 //==================================================================
@@ -192,7 +195,7 @@ input double V_ChopFator       = 2.0;
 input group "Voto 4 - Agressao"
 input int    A_JanelaSeg       = 10;
 input int    A_NiveisMin       = 3;
-input double A_FatorVolume     = 2.0;
+input double A_FatorVolume     = 3.0;
 input double A_DominioPct      = 70;
 input int    A_MediaN          = 30;
 input bool   A_ExigirSustentar = true;
