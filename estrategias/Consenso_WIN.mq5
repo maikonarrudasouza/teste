@@ -56,9 +56,16 @@
 //|  v1.05 - painel mostra a LEITURA ao vivo de cada robo (mesmo sem  |
 //|          votar) e se ha ticks de negocio com lado agressor.       |
 //|          Sem eles Delta/Fita/Agressao ficam parados.              |
+//|                                                                   |
+//|  v1.06 - InpTempoReal: o consenso passa a ser conferido a cada    |
+//|          segundo, nao so no fechamento da barra. Delta, VP e      |
+//|          Agressao continuam votando no fechamento (leem barras    |
+//|          fechadas); a Fita ja era por segundo. Entao, quando a    |
+//|          Fita completa o consenso no meio da barra, a ordem sai   |
+//|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.05"
+#property version   "1.06"
 
 #include <Trade\Trade.mqh>
 
@@ -88,6 +95,7 @@ input double     InpLots          = 1.0;    // Contratos
 input int        InpStopPoints    = 120;    // Stop (pontos)
 input int        InpTakePoints    = 75;     // Alvo (pontos)
 input bool       InpReverter      = true;   // 3+ votos contrarios: zera e vira
+input bool       InpTempoReal     = true;   // Checar o consenso a cada segundo (nao so no fechamento da barra)
 
 input group "Horario (servidor)"
 input bool       InpUseTimeFilter = true;   // Filtro de horario para NOVAS entradas
@@ -349,8 +357,13 @@ int OnInit()
                  !(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE));
    if(painelAtivo) AtualizarPainel(true);
 
-   PrintFormat("Consenso: %d de %d votos | limite %s (dist %d) | validade %d/%d barras | stop %d | alvo %d",
+   if(InpTempoReal && !InpUsarFita)
+      Print("Tempo real ligado sem a Fita: os outros 3 robos so votam no fechamento da barra, "
+            "entao na pratica o consenso continua sendo conferido so na virada.");
+
+   PrintFormat("Consenso: %d de %d votos | %s | limite %s (dist %d) | validade %d/%d barras | stop %d | alvo %d",
                InpVotosMin, ativos,
+               InpTempoReal ? "conferido a cada segundo" : "so no fechamento da barra",
                InpModoPreco == PRECO_FECHAMENTO ? "no FECHAMENTO" : "na MAX/MIN",
                InpDistancia, InpValidade3, InpValidade4, InpStopPoints, InpTakePoints);
    return INIT_SUCCEEDED;
@@ -1081,17 +1094,35 @@ int VotoAgressao()
 //+==================================================================+
 //| ORDEM                                                            |
 //+==================================================================+
-bool EnviarLimite(int dir, int nVotos)
+bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
 {
    double c1 = iClose(_Symbol, PERIOD_M1, 1);
    double h1 = iHigh(_Symbol,  PERIOD_M1, 1);
    double l1 = iLow(_Symbol,   PERIOD_M1, 1);
    if(c1 <= 0.0) return false;
 
+   //--- intrabar: a referencia e o preco de agora, nao o fechamento da
+   //--- barra anterior, que pode estar varios pontos atras.
+   double ref = c1;
+   if(intrabar)
+   {
+      MqlTick tk;
+      if(SymbolInfoTick(_Symbol, tk) && tk.last > 0.0) ref = tk.last;
+      else
+      {
+         double c0 = iClose(_Symbol, PERIOD_M1, 0);
+         if(c0 > 0.0) ref = c0;
+      }
+      //--- no modo extremo, usa a max/min da barra em curso
+      double h0 = iHigh(_Symbol, PERIOD_M1, 0);
+      double l0 = iLow(_Symbol,  PERIOD_M1, 0);
+      if(h0 > 0.0 && l0 > 0.0) { h1 = h0; l1 = l0; }
+   }
+
    double preco;
    //--- compra sempre ABAIXO da referencia, venda sempre ACIMA
    if(InpModoPreco == PRECO_FECHAMENTO)
-      preco = (dir > 0) ? c1 - InpDistancia * _Point : c1 + InpDistancia * _Point;
+      preco = (dir > 0) ? ref - InpDistancia * _Point : ref + InpDistancia * _Point;
    else
       preco = (dir > 0) ? l1 - InpDistancia * _Point : h1 + InpDistancia * _Point;
    preco = NormalizePrice(preco);
@@ -1395,7 +1426,13 @@ void NovaBarra()
    if(InpUsarAgressao) RegistrarVoto(3, VotoAgressao(), b1);
 
    CancelarVencida();
+   AvaliarConsenso(false);
+}
 
+//--- Conta os votos e, havendo consenso novo, opera.
+//--- intrabar = chamada no meio da barra (so a Fita muda de voto ali).
+void AvaliarConsenso(bool intrabar)
+{
    //--- conta os votos validos
    int compras = 0, vendas = 0;
    for(int v = 0; v < NVOTOS; v++)
@@ -1421,8 +1458,9 @@ void NovaBarra()
    if(dir == consDir && chave <= consChave) return;
 
    if(InpLog)
-      PrintFormat("CONSENSO %s: %d votos (compra %d x venda %d)",
-                  dir > 0 ? "COMPRA" : "VENDA", n, compras, vendas);
+      PrintFormat("CONSENSO %s: %d votos (compra %d x venda %d)%s",
+                  dir > 0 ? "COMPRA" : "VENDA", n, compras, vendas,
+                  intrabar ? " [no meio da barra]" : "");
 
    ulong pt, ot;
    int pos = PosicaoDir(pt);
@@ -1443,7 +1481,7 @@ void NovaBarra()
    //--- zerar vale sempre; abrir, so no horario de entrada
    if(!HorarioEntrada()) { MarcarConsenso(dir, chave); return; }
 
-   if(EnviarLimite(dir, n)) MarcarConsenso(dir, chave);
+   if(EnviarLimite(dir, n, intrabar)) MarcarConsenso(dir, chave);
 }
 
 //+------------------------------------------------------------------+
@@ -1458,6 +1496,7 @@ void OnTick()
    }
 
    //--- Fita: avaliada no maximo 1x por segundo
+   bool votouAgora = false;
    if(InpUsarFita)
    {
       MqlTick agora;
@@ -1466,6 +1505,7 @@ void OnTick()
       {
          ultimaAvaliacaoMs = agora.time_msc;
          RegistrarVoto(1, VotoFita(agora.time_msc), iTime(_Symbol, PERIOD_M1, 0));
+         votouAgora = true;
       }
    }
 
@@ -1475,8 +1515,18 @@ void OnTick()
       lastBarTime = b0;
       NovaBarra();
       AtualizarPainel(true);
+      return;
    }
-   else
-      AtualizarPainel();
+
+   //--- consenso no meio da barra: so a Fita muda de voto aqui, entao
+   //--- so vale checar quando ela acabou de ser reavaliada
+   if(InpTempoReal && votouAgora)
+   {
+      AvaliarConsenso(true);
+      AtualizarPainel(true);
+      return;
+   }
+
+   AtualizarPainel();
 }
 //+------------------------------------------------------------------+
