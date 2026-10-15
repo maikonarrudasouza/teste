@@ -57,6 +57,8 @@
 //|          votar) e se ha ticks de negocio com lado agressor.       |
 //|          Sem eles Delta/Fita/Agressao ficam parados.              |
 //|                                                                   |
+//|  v1.08 - protecao contra agressao: cancela a limite e zera a    |
+//|          posicao quando a fita vem muito dominada contra.       |
 //|  v1.07 - padroes vindos dos .set dos robos avulsos (aa, delta,   |
 //|          fita, vp-breackot): Delta e Fita ficaram bem mais      |
 //|          folgados, para votarem mais vezes.                     |
@@ -68,7 +70,7 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.07"
+#property version   "1.08"
 
 #include <Trade\Trade.mqh>
 
@@ -200,6 +202,23 @@ input double A_DominioPct      = 70;
 input int    A_MediaN          = 30;
 input bool   A_ExigirSustentar = true;
 
+//==================================================================
+//  PROTECAO CONTRA AGRESSAO
+//  Le os ultimos P_JanelaSeg segundos de negocios AO VIVO. Se a
+//  agressao estourar o volume normal e vier dominada contra a mao
+//  do robo, cancela a limite pendente e/ou zera a posicao.
+//==================================================================
+input group "Protecao contra agressao"
+input bool   P_Usar            = true;   // Ligar a protecao
+input int    P_JanelaSeg       = 10;     // Janela de leitura (segundos)
+input double P_FatorVolume     = 3.0;    // Volume da janela >= fator x volume normal
+input double P_DominioPct      = 75;     // % do volume agredido de um lado
+input int    P_NiveisMin       = 3;      // Niveis (ticks) que o preco andou contra
+input bool   P_CancelarLimite  = true;   // Cancelar a ordem limite pendente
+input bool   P_ZerarPosicao    = true;   // Zerar a posicao aberta
+input bool   P_SoNoPrejuizo    = false;  // Zerar so se a posicao estiver perdendo
+input int    P_PausaSeg        = 120;    // Segundos sem mandar nova ordem depois de proteger
+
 //+------------------------------------------------------------------+
 //| ESTADO                                                           |
 //+------------------------------------------------------------------+
@@ -215,6 +234,9 @@ Voto votos[NVOTOS];
 
 CTrade   trade;
 datetime lastBarTime = 0;
+datetime protegidoAte = 0;   // nao manda ordem nova antes dessa hora
+datetime protUltSeg   = 0;   // protecao e lida no maximo 1x por segundo
+double   protFator    = 0;   // ultimo pico de volume lido pela protecao
 datetime ordemBarra  = 0;   // barra em que a limite foi enviada
 int      ordemValid  = 0;   // validade dela em barras
 ENUM_ORDER_TYPE_TIME tipoValidade = ORDER_TIME_DAY;
@@ -1095,10 +1117,137 @@ int VotoAgressao()
 }
 
 //+==================================================================+
+//| PROTECAO CONTRA AGRESSAO                                         |
+//+==================================================================+
+//--- agressao dos ultimos P_JanelaSeg segundos ate agora: +1, -1 ou 0
+int AgressaoAgora(double &fator)
+{
+   fator = 0;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 1, A_MediaN, r) < A_MediaN) return 0;
+   double soma = 0;
+   for(int k = 0; k < A_MediaN; k++) soma += VolBar(r[k]);
+   double volNormal = soma / A_MediaN;              // volume de uma barra M1
+   if(volNormal <= 0) return 0;
+   double volJanela = volNormal * P_JanelaSeg / 60.0;
+   if(volJanela <= 0) return 0;
+
+   MqlTick tk[];
+   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
+   ulong de  = ate - (ulong)P_JanelaSeg * 1000;
+   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
+   if(n < 2) return 0;
+
+   bool temFlags = false;
+   for(int i = 0; i < n && !temFlags; i++)
+      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0) temFlags = true;
+
+   double vc = 0, vv = 0;
+   double p0 = tk[0].last, mx = p0, mn = p0;
+   int    ultimo = 0;
+   for(int i = 0; i < n; i++)
+   {
+      int l = 0;
+      if(temFlags)
+      {
+         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
+         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
+         l = (b && !v) ? 1 : (v && !b) ? -1 : 0;
+      }
+      else if(i > 0)
+      {
+         l = (tk[i].last > tk[i-1].last) ? 1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
+         ultimo = l;
+      }
+      double vol = VolTick(tk[i]);
+      if(l > 0) vc += vol;
+      if(l < 0) vv += vol;
+      if(tk[i].last > 0.0)
+      {
+         mx = MathMax(mx, tk[i].last);
+         mn = MathMin(mn, tk[i].last);
+      }
+   }
+
+   double total = vc + vv;
+   fator = total / volJanela;
+   if(total <= 0 || total < P_FatorVolume * volJanela) return 0;
+
+   double niveis = P_NiveisMin * TickSz();
+   if(vc >= P_DominioPct / 100.0 * total && mx - p0 >= niveis - TickSz() / 2) return  1;
+   if(vv >= P_DominioPct / 100.0 * total && p0 - mn >= niveis - TickSz() / 2) return -1;
+   return 0;
+}
+
+//--- resultado da posicao em pontos (positivo = ganhando)
+double LucroPontos(ulong ticket, int dir)
+{
+   if(ticket == 0 || !PositionSelectByTicket(ticket)) return 0.0;
+   double abertura = PositionGetDouble(POSITION_PRICE_OPEN);
+   double atual    = PositionGetDouble(POSITION_PRICE_CURRENT);
+   if(abertura <= 0.0 || atual <= 0.0 || _Point <= 0.0) return 0.0;
+   return dir * (atual - abertura) / _Point;
+}
+
+void ProtecaoAgressao()
+{
+   if(!P_Usar) return;
+
+   //--- so tem o que proteger se houver posicao ou ordem pendente
+   ulong tPos = 0, tOrd = 0;
+   int posDir = PosicaoDir(tPos);
+   int ordDir = OrdemDir(tOrd);
+   if(posDir == 0 && ordDir == 0) { protFator = 0; return; }
+
+   //--- no maximo uma leitura por segundo
+   datetime agora = TimeCurrent();
+   if(agora == protUltSeg) return;
+   protUltSeg = agora;
+
+   int ag = AgressaoAgora(protFator);
+   if(ag == 0) return;
+
+   //--- posicao com a agressao vindo contra
+   if(posDir != 0 && ag == -posDir && P_ZerarPosicao)
+   {
+      double pts = LucroPontos(tPos, posDir);
+      if(!(P_SoNoPrejuizo && pts > 0.0))
+      {
+         if(Zerar())
+         {
+            protegidoAte = agora + P_PausaSeg;
+            consDir = 0;
+            if(InpLog)
+               PrintFormat("PROTECAO: agressao %s de %.1fx o volume contra a posicao %s - zerado em %.0f pontos",
+                           (ag > 0 ? "de compra" : "de venda"), protFator,
+                           (posDir > 0 ? "comprada" : "vendida"), pts);
+            return;
+         }
+      }
+   }
+
+   //--- ordem limite pendente que ia ser executada contra o fluxo
+   if(ordDir != 0 && ag == -ordDir && P_CancelarLimite)
+   {
+      CancelarOrdens();
+      protegidoAte = agora + P_PausaSeg;
+      consDir = 0;
+      if(InpLog)
+         PrintFormat("PROTECAO: agressao %s de %.1fx o volume contra a limite %s - ordem cancelada",
+                     (ag > 0 ? "de compra" : "de venda"), protFator,
+                     (ordDir > 0 ? "de compra" : "de venda"));
+   }
+}
+
+//+==================================================================+
 //| ORDEM                                                            |
 //+==================================================================+
 bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
 {
+   //--- acabou de proteger: fica de fora pelo tempo da pausa
+   if(P_Usar && P_PausaSeg > 0 && TimeCurrent() < protegidoAte) return false;
+
    double c1 = iClose(_Symbol, PERIOD_M1, 1);
    double h1 = iHigh(_Symbol,  PERIOD_M1, 1);
    double l1 = iLow(_Symbol,   PERIOD_M1, 1);
@@ -1309,7 +1458,7 @@ void AtualizarPainel(bool forcar = false)
    painelUltSeg = agora;
 
    int x = InpPainelX, y = InpPainelY, lh = 17;
-   int alt = 34 + NVOTOS * lh + 4 * lh + 12;
+   int alt = 34 + NVOTOS * lh + 5 * lh + 12;
    Fundo(x, y, 440, alt);
    Rotulo("tit", x + 10, y + 8, "CONSENSO WIN", InpCorTexto, 10);
 
@@ -1387,6 +1536,23 @@ void AtualizarPainel(bool forcar = false)
    else
       dg = StringFormat("Ticks na ultima barra: %d | %.0f%% com agressor", diagTicks, diagFlagsPct);
    Rotulo("diag", x + 10, yb + 3 * lh, dg, cd, 8);
+
+   //--- protecao contra agressao
+   string pr;
+   color  cpr = clrDimGray;
+   if(!P_Usar)
+      pr = "Protecao contra agressao desligada";
+   else if(TimeCurrent() < protegidoAte)
+   {
+      pr = StringFormat("PROTEGIDO - sem ordem nova por %d s", (int)(protegidoAte - TimeCurrent()));
+      cpr = clrGoldenrod;
+   }
+   else if(protFator <= 0.0)
+      pr = "Protecao ligada | le a fita quando houver ordem ou posicao";
+   else
+      pr = StringFormat("Protecao ligada | agressao agora %.1fx (dispara em %.1fx)",
+                        protFator, P_FatorVolume);
+   Rotulo("prot", x + 10, yb + 4 * lh, pr, cpr, 8);
 
    ChartRedraw(0);
 }
@@ -1497,6 +1663,9 @@ void OnTick()
       AtualizarPainel();
       return;
    }
+
+   //--- protecao: le a agressao ao vivo antes de qualquer decisao
+   ProtecaoAgressao();
 
    //--- Fita: avaliada no maximo 1x por segundo
    bool votouAgora = false;

@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.01"
+#property version     "1.02"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -59,12 +59,25 @@ input int             InpMaxOperacoesDia  = 6;          // Máximo de entradas p
 input double          InpPerdaMaxDia      = 300;        // Perda máxima do dia em R$ (0 = sem limite)
 input int             InpPerdasSeguidas   = 3;          // Para no dia após N perdas seguidas (0 = não)
 
+input group "Proteção contra agressão"
+input bool            InpProtecao         = true;       // Cancelar/zerar quando a agressão vem contra
+input int             InpProtJanelaSeg    = 10;         // Janela de leitura ao vivo (segundos)
+input double          InpProtFator        = 3.0;        // Volume da janela >= fator x volume normal
+input double          InpProtDominioPct   = 75;         // % do volume agredido de um lado
+input int             InpProtNiveis       = 3;          // Níveis (ticks) que o preço andou contra
+input bool            InpProtCancelar     = true;       // Cancelar a ordem limitada pendente
+input bool            InpProtZerar        = true;       // Zerar a posição aberta
+input bool            InpProtSoNoPrejuizo = false;      // Zerar só se a posição estiver perdendo
+input int             InpProtPausaSeg     = 120;        // Segundos sem nova entrada depois de proteger
+
 //--- estado
 CTrade   trade;
 datetime g_ultimaBarra = 0;
 ulong    g_ordem       = 0;
 int      g_ordemBarras = 0;
 bool     g_avisoFlags  = false;
+datetime g_protegidoAte = 0;   // sem entrada nova antes dessa hora
+datetime g_protUltSeg   = 0;   // protecao lida no maximo 1x por segundo
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -320,8 +333,156 @@ int Agressao(const MqlRates &barra, double volNormalBarra, double &inicio)
 //+------------------------------------------------------------------+
 //| Entrada: limitada X pontos melhor que o fechamento da barra       |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Proteção: agressão ao vivo contra a mão do robô                   |
+//+------------------------------------------------------------------+
+//--- agressão dos últimos InpProtJanelaSeg segundos: +1, -1 ou 0
+int AgressaoAgora(double &fator)
+  {
+   fator = 0;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, 1, InpMediaN, r) < InpMediaN)
+      return 0;
+   double soma = 0;
+   for(int k = 0; k < InpMediaN; k++)
+      soma += Vol(r[k]);
+   double volNormalBarra = soma / InpMediaN;
+   if(volNormalBarra <= 0)
+      return 0;
+   double volJanela = volNormalBarra * InpProtJanelaSeg / (double)PeriodSeconds(InpTF);
+   if(volJanela <= 0)
+      return 0;
+
+   MqlTick tk[];
+   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
+   ulong de  = ate - (ulong)InpProtJanelaSeg * 1000;
+   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
+   if(n < 2)
+      return 0;
+
+   bool temFlags = false;
+   for(int i = 0; i < n && !temFlags; i++)
+      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0)
+         temFlags = true;
+
+   double vc = 0, vv = 0;
+   double p0 = tk[0].last, mx = p0, mn = p0;
+   int    ultimo = 0;
+   for(int i = 0; i < n; i++)
+     {
+      int l = 0;
+      if(temFlags)
+        {
+         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
+         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
+         l = (b && !v) ? +1 : (v && !b) ? -1 : 0;
+        }
+      else
+         if(i > 0)
+           {
+            l = (tk[i].last > tk[i-1].last) ? +1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
+            ultimo = l;
+           }
+      double vol = VolTick(tk[i]);
+      if(l > 0)
+         vc += vol;
+      if(l < 0)
+         vv += vol;
+      if(tk[i].last > 0)
+        {
+         mx = MathMax(mx, tk[i].last);
+         mn = MathMin(mn, tk[i].last);
+        }
+     }
+
+   double total = vc + vv;
+   fator = total / volJanela;
+   if(total <= 0 || total < InpProtFator * volJanela)
+      return 0;
+
+   double niveis = InpProtNiveis * Tick();
+   if(vc >= InpProtDominioPct / 100.0 * total && mx - p0 >= niveis - Tick() / 2)
+      return +1;
+   if(vv >= InpProtDominioPct / 100.0 * total && p0 - mn >= niveis - Tick() / 2)
+      return -1;
+   return 0;
+  }
+
+void ProtecaoAgressao()
+  {
+   if(!InpProtecao)
+      return;
+
+   //--- direção da posição e da ordem pendente
+   ulong t[];
+   int nPos = ListarPosicoes(t);
+   int posDir = 0;
+   if(nPos > 0 && PositionSelectByTicket(t[0]))
+      posDir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? +1 : -1;
+   int ordDir = 0;
+   if(TemOrdem())
+     {
+      ENUM_ORDER_TYPE tp = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      ordDir = (tp == ORDER_TYPE_BUY_LIMIT || tp == ORDER_TYPE_BUY) ? +1 : -1;
+     }
+   if(posDir == 0 && ordDir == 0)
+      return;
+
+   datetime agora = TimeCurrent();
+   if(agora == g_protUltSeg)
+      return;
+   g_protUltSeg = agora;
+
+   double fator = 0;
+   int ag = AgressaoAgora(fator);
+   if(ag == 0)
+      return;
+
+   //--- posição com a agressão vindo contra
+   if(posDir != 0 && ag == -posDir && InpProtZerar)
+     {
+      double pts = 0;
+      if(PositionSelectByTicket(t[0]))
+        {
+         double ab = PositionGetDouble(POSITION_PRICE_OPEN);
+         double at = PositionGetDouble(POSITION_PRICE_CURRENT);
+         if(ab > 0 && at > 0)
+            pts = posDir * (at - ab) / _Point;
+        }
+      if(!(InpProtSoNoPrejuizo && pts > 0))
+        {
+         Zerar();
+         g_protegidoAte = agora + InpProtPausaSeg;
+         PrintFormat("PROTEÇÃO: agressão %s de %.1fx o volume contra a posição %s - zerado em %.0f pontos",
+                     (ag > 0 ? "de compra" : "de venda"), fator,
+                     (posDir > 0 ? "comprada" : "vendida"), pts);
+         return;
+        }
+     }
+
+   //--- ordem limitada que ia ser executada contra o fluxo
+   if(ordDir != 0 && ag == -ordDir && InpProtCancelar)
+     {
+      CancelarOrdem();
+      g_ordemBarras = 0;
+      g_protegidoAte = agora + InpProtPausaSeg;
+      PrintFormat("PROTEÇÃO: agressão %s de %.1fx o volume contra a limitada %s - ordem cancelada",
+                  (ag > 0 ? "de compra" : "de venda"), fator,
+                  (ordDir > 0 ? "de compra" : "de venda"));
+     }
+  }
+
+//+------------------------------------------------------------------+
 void Entrar(int dir, double fechamento, double inicio)
   {
+   //--- acabou de proteger: fica de fora pelo tempo da pausa
+   if(InpProtecao && InpProtPausaSeg > 0 && TimeCurrent() < g_protegidoAte)
+     {
+      PrintFormat("Entrada ignorada: protegido por mais %d s", (int)(g_protegidoAte - TimeCurrent()));
+      return;
+     }
+
    double entrada = Arred(fechamento - dir * Pts(InpOffsetLimite));
    double stop    = Arred(entrada - dir * Pts(InpStopFixo));
    double alvo    = Arred(entrada + dir * Pts(InpAlvoFixo));
@@ -433,6 +594,7 @@ void OnTick()
       return;
      }
 
+   ProtecaoAgressao();
    GerirTrailing();
 
    datetime barra = iTime(_Symbol, InpTF, 0);
