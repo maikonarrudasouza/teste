@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.02"
+#property version     "1.03"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -59,6 +59,13 @@ input int             InpMaxOperacoesDia  = 6;          // Máximo de entradas p
 input double          InpPerdaMaxDia      = 300;        // Perda máxima do dia em R$ (0 = sem limite)
 input int             InpPerdasSeguidas   = 3;          // Para no dia após N perdas seguidas (0 = não)
 
+input group "Filtro de tendência"
+input bool            InpUsarFiltroTend   = false;      // Só operar a favor da média (desligado por padrão)
+input ENUM_TIMEFRAMES InpTFTendencia      = PERIOD_M5;  // Tempo gráfico da média
+input int             InpMAPeriodo        = 50;         // Período da média
+input ENUM_MA_METHOD  InpMAMetodo         = MODE_EMA;   // Método da média
+input int             InpMADistMin        = 25;         // Zona neutra em volta da média (pontos)
+
 input group "Proteção contra agressão"
 input bool            InpProtecao         = true;       // Cancelar/zerar quando a agressão vem contra
 input int             InpProtJanelaSeg    = 10;         // Janela de leitura ao vivo (segundos)
@@ -81,14 +88,31 @@ datetime g_protegidoAte = 0;   // sem entrada nova antes dessa hora
 datetime g_protUltSeg   = 0;   // protecao lida no maximo 1x por segundo
 int      g_protAvisos   = 0;   // quantas vezes a protecao disparou hoje
 datetime g_protDia      = 0;   // dia dos contadores
+int      g_hMA          = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   if(InpUsarFiltroTend)
+     {
+      g_hMA = iMA(_Symbol, InpTFTendencia, InpMAPeriodo, 0, InpMAMetodo, PRICE_CLOSE);
+      if(g_hMA == INVALID_HANDLE)
+        {
+         Print("Falha ao criar a média do filtro de tendência.");
+         return(INIT_FAILED);
+        }
+     }
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(50);
    return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   if(g_hMA != INVALID_HANDLE)
+      IndicatorRelease(g_hMA);
   }
 
 //+------------------------------------------------------------------+
@@ -124,6 +148,24 @@ int MinutosAgora()
   }
 
 datetime InicioDoDia(datetime t) { return t - (t % 86400); }
+
+//--- +1 alta, -1 baixa, 0 dentro da zona neutra (ou filtro desligado)
+int Tendencia()
+  {
+   if(!InpUsarFiltroTend || g_hMA == INVALID_HANDLE)
+      return 0;
+   double ma[];
+   ArraySetAsSeries(ma, true);
+   if(CopyBuffer(g_hMA, 0, 0, 1, ma) < 1 || ma[0] <= 0)
+      return 0;
+   double preco = iClose(_Symbol, InpTFTendencia, 0);
+   if(preco <= 0)
+      return 0;
+   double dist = preco - ma[0];
+   if(MathAbs(dist) < Pts(InpMADistMin))
+      return 0;
+   return (dist > 0) ? +1 : -1;
+  }
 
 double Vol(const MqlRates &r) { return (r.real_volume > 0) ? (double)r.real_volume : (double)r.tick_volume; }
 
@@ -606,8 +648,22 @@ void NovaBarra()
 
    double inicio = 0;
    int dir = Agressao(r[0], volNormal, inicio);
-   if(dir != 0)
-      Entrar(dir, r[0].close, inicio);
+   if(dir == 0)
+      return;
+
+   //--- filtro de tendência: não vende acima da média nem compra abaixo
+   if(InpUsarFiltroTend)
+     {
+      int tend = Tendencia();
+      if(tend != 0 && tend != dir)
+        {
+         PrintFormat("Entrada de %s barrada pelo filtro de tendência (mercado de %s)",
+                     (dir > 0 ? "compra" : "venda"), (tend > 0 ? "alta" : "baixa"));
+         return;
+        }
+     }
+
+   Entrar(dir, r[0].close, inicio);
   }
 
 //+------------------------------------------------------------------+
