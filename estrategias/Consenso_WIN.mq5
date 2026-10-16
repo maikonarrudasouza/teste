@@ -70,13 +70,19 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.10"
+#property version   "1.11"
 
 #include <Trade\Trade.mqh>
 
 //==================================================================
 //  CONSENSO E ORDEM
 //==================================================================
+enum EModoAD
+{
+   AD_NIVEL     = 0,   // Valor do indicador: acima de zero = compra
+   AD_SALDO_DIA = 1    // Variacao desde a primeira barra do dia
+};
+
 enum ETipoMedia
 {
    MEDIA_COMUM      = 0,   // Media comum (MODE_EMA, MODE_SMA...)
@@ -226,8 +232,21 @@ input bool   A_ExigirSustentar = true;
 //  Candle fechou ACIMA da media e a ordem e de VENDA  -> cancela.
 //  Candle fechou ABAIXO da media e a ordem e de COMPRA -> cancela.
 //==================================================================
+//==================================================================
+//  FILTRO A/D (Accumulation/Distribution)
+//  A/D positivo: so compra. A/D negativo: so venda.
+//  Quando o A/D troca de sinal, as ordens limite do lado que deixou
+//  de valer sao canceladas.
+//==================================================================
+input group "Filtro A/D (Accumulation/Distribution)"
+input bool            AD_Usar    = true;              // Ligar o filtro
+input ENUM_TIMEFRAMES AD_TF      = PERIOD_M1;         // Timeframe do indicador
+input ENUM_APPLIED_VOLUME AD_Vol = VOLUME_REAL;       // Volume usado (Real, como no indicador)
+input EModoAD         AD_Modo    = AD_NIVEL;          // Nivel zero ou saldo do dia
+input bool            AD_Cancelar= true;              // Cruzou o zero: cancela a limite do lado contrario
+
 input group "Cancelar a limite pela media"
-input bool            M_Usar     = true;             // Ligar a regra
+input bool            M_Usar     = false;            // Ligar a regra (desligada: o filtro agora e o A/D)
 input ENUM_TIMEFRAMES M_TF       = PERIOD_M1;        // Timeframe do candle e da media
 input ETipoMedia      M_Tipo     = MEDIA_ADAPTATIVA; // Tipo de media
 input ENUM_APPLIED_PRICE M_Preco = PRICE_WEIGHTED;   // Preco aplicado (WEIGHTED = HLCC/4)
@@ -282,6 +301,9 @@ datetime consChave = 0;
 
 int      hMA  = INVALID_HANDLE;
 int      hMC  = INVALID_HANDLE;   // media que cancela a limite
+int      hAD  = INVALID_HANDLE;   // Accumulation/Distribution
+int      adSinal     = 0;         // +1 positivo, -1 negativo, 0 indefinido
+double   adValor     = 0.0;       // ultimo valor lido
 int      hATR = INVALID_HANDLE;
 int      fitaSinaisAtivos = 0;
 
@@ -391,6 +413,11 @@ int OnInit()
          hMA = iMA(_Symbol, T_TF, T_Periodo, 0, T_Metodo, PRICE_CLOSE);
       if(hMA == INVALID_HANDLE) { Print("Falha ao criar a media do filtro"); return INIT_FAILED; }
    }
+   if(AD_Usar)
+   {
+      hAD = iAD(_Symbol, AD_TF, AD_Vol);
+      if(hAD == INVALID_HANDLE) { Print("Falha ao criar o Accumulation/Distribution"); return INIT_FAILED; }
+   }
    if(M_Usar)
    {
       if(M_Tipo == MEDIA_ADAPTATIVA)
@@ -445,6 +472,7 @@ void OnDeinit(const int reason)
 {
    if(hMA  != INVALID_HANDLE) IndicatorRelease(hMA);
    if(hMC  != INVALID_HANDLE) IndicatorRelease(hMC);
+   if(hAD  != INVALID_HANDLE) IndicatorRelease(hAD);
    if(hATR != INVALID_HANDLE) IndicatorRelease(hATR);
    ObjectsDeleteAll(0, PFX);
    ChartRedraw(0);
@@ -1321,6 +1349,16 @@ bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
    //--- acabou de proteger: fica de fora pelo tempo da pausa
    if(P_Usar && P_PausaSeg > 0 && TimeCurrent() < protegidoAte) return false;
 
+   //--- A/D contra o lado da ordem: nao manda
+   if(AD_Usar && adSinal != 0 && dir != adSinal)
+   {
+      if(InpLog)
+         PrintFormat("Limite de %s nao enviada: A/D esta %s (%.0f)",
+                     (dir > 0 ? "compra" : "venda"),
+                     (adSinal > 0 ? "positivo" : "negativo"), adValor);
+      return false;
+   }
+
    //--- candle fechado contra o lado da ordem: nao manda
    double cc, mm;
    if(CandleContra(dir, cc, mm))
@@ -1419,6 +1457,64 @@ bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
                      dir > 0 ? "COMPRA" : "VENDA", preco, nVotos, valid, stop, alvo);
    }
    return true;
+}
+
+//+==================================================================+
+//| FILTRO A/D                                                       |
+//+==================================================================+
+//--- le o A/D na ultima barra fechada e devolve +1, -1 ou 0
+int LerAD()
+{
+   if(!AD_Usar || hAD == INVALID_HANDLE) return 0;
+
+   if(AD_Modo == AD_NIVEL)
+   {
+      double v[];
+      ArraySetAsSeries(v, true);
+      if(CopyBuffer(hAD, 0, 1, 1, v) < 1) return adSinal;
+      adValor = v[0];
+   }
+   else
+   {
+      //--- saldo desde a primeira barra do dia: nao depende de onde
+      //--- o historico do grafico comeca
+      datetime ini = Dia(TimeCurrent());
+      int n = iBarShift(_Symbol, AD_TF, ini, false);
+      if(n < 1) return adSinal;
+      double v[];
+      ArraySetAsSeries(v, true);
+      if(CopyBuffer(hAD, 0, 1, n, v) < n) return adSinal;
+      adValor = v[0] - v[n - 1];
+   }
+
+   if(adValor > 0.0) return  1;
+   if(adValor < 0.0) return -1;
+   return 0;
+}
+
+//--- roda no fechamento de cada barra: atualiza o sinal e, quando ele
+//--- troca, cancela a limite do lado que deixou de valer
+void AtualizarAD()
+{
+   if(!AD_Usar) return;
+   int novo = LerAD();
+   if(novo == 0 || novo == adSinal) return;   // sem leitura ou sem mudanca
+
+   int anterior = adSinal;
+   adSinal = novo;
+   if(InpLog)
+      PrintFormat("A/D virou %s (%.0f)", (novo > 0 ? "POSITIVO - so compra" : "NEGATIVO - so venda"), adValor);
+
+   if(!AD_Cancelar || anterior == 0) return;
+   ulong t;
+   int dir = OrdemDir(t);
+   if(dir != 0 && dir != novo && trade.OrderDelete(t))
+   {
+      ordemBarra = 0;
+      if(InpLog)
+         PrintFormat("Limite de %s cancelada: A/D cruzou para %s",
+                     (dir > 0 ? "compra" : "venda"), (novo > 0 ? "positivo" : "negativo"));
+   }
 }
 
 //--- true se o ultimo candle fechado esta do lado contrario de dir
@@ -1663,7 +1759,13 @@ void AtualizarPainel(bool forcar = false)
    //--- protecao contra agressao
    string pr;
    color  cpr = clrDimGray;
-   if(!P_Usar)
+   if(!P_Usar && AD_Usar)
+   {
+      if(adSinal > 0)      { pr = StringFormat("A/D POSITIVO (%.0f) - so compra", adValor); cpr = InpCorCompra; }
+      else if(adSinal < 0) { pr = StringFormat("A/D NEGATIVO (%.0f) - so venda",  adValor); cpr = InpCorVenda;  }
+      else                   pr = "A/D: aguardando a primeira barra fechada";
+   }
+   else if(!P_Usar)
       pr = "Protecao contra agressao desligada";
    else if(TimeCurrent() < protegidoAte)
    {
@@ -1719,6 +1821,7 @@ void NovaBarra()
    if(InpUsarVP)       RegistrarVoto(2, VotoVP(),       b1);
    if(InpUsarAgressao) RegistrarVoto(3, VotoAgressao(), b1);
 
+   AtualizarAD();
    CancelarContraMedia();
    CancelarVencida();
    AvaliarConsenso(false);

@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.05"
+#property version     "1.06"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -77,8 +77,21 @@ input int             InpAMAPeriodo       = 1;          // AMA: período
 input int             InpAMARapida        = 6;          // AMA: EMA rápida
 input int             InpAMALenta         = 30;         // AMA: EMA lenta
 
+enum EModoAD
+  {
+   AD_NIVEL     = 0,   // Valor do indicador: acima de zero = compra
+   AD_SALDO_DIA = 1    // Variação desde a primeira barra do dia
+  };
+
+input group "Filtro A/D (Accumulation/Distribution)"
+input bool            InpUsarAD           = true;            // Ligar o filtro
+input ENUM_TIMEFRAMES InpADTF             = PERIOD_CURRENT;  // Timeframe do indicador (CURRENT = o do robô)
+input ENUM_APPLIED_VOLUME InpADVol        = VOLUME_REAL;     // Volume usado (Real, como no indicador)
+input EModoAD         InpADModo           = AD_NIVEL;        // Nível zero ou saldo do dia
+input bool            InpADCancelar       = true;            // Cruzou o zero: cancela a limitada do lado contrário
+
 input group "Cancelar a limitada pela média"
-input bool            InpCancelaMedia     = true;           // No fechamento da barra, cancela a limitada do lado contrário à média
+input bool            InpCancelaMedia     = false;          // Cancela a limitada do lado contrário à média (desligada: o filtro agora é o A/D)
 input ENUM_TIMEFRAMES InpMCTF             = PERIOD_CURRENT; // Timeframe do candle e da média (CURRENT = o do robô)
 input ETipoMedia      InpMCTipo           = MEDIA_ADAPTATIVA; // Tipo de média
 input ENUM_APPLIED_PRICE InpMCPreco       = PRICE_WEIGHTED;   // Preço aplicado (WEIGHTED = HLCC/4)
@@ -113,6 +126,10 @@ int      g_protAvisos   = 0;   // quantas vezes a protecao disparou hoje
 datetime g_protDia      = 0;   // dia dos contadores
 int      g_hMA          = INVALID_HANDLE;
 int      g_hMC          = INVALID_HANDLE;   // média que cancela a limitada
+int      g_hAD          = INVALID_HANDLE;   // Accumulation/Distribution
+ENUM_TIMEFRAMES g_adTF  = PERIOD_CURRENT;
+int      g_adSinal      = 0;                // +1 positivo, -1 negativo
+double   g_adValor      = 0;
 ENUM_TIMEFRAMES g_mcTF  = PERIOD_CURRENT;
 
 //+------------------------------------------------------------------+
@@ -127,6 +144,16 @@ int OnInit()
       if(g_hMA == INVALID_HANDLE)
         {
          Print("Falha ao criar a média do filtro de tendência.");
+         return(INIT_FAILED);
+        }
+     }
+   if(InpUsarAD)
+     {
+      g_adTF = (InpADTF == PERIOD_CURRENT) ? InpTF : InpADTF;
+      g_hAD = iAD(_Symbol, g_adTF, InpADVol);
+      if(g_hAD == INVALID_HANDLE)
+        {
+         Print("Falha ao criar o Accumulation/Distribution.");
          return(INIT_FAILED);
         }
      }
@@ -156,6 +183,8 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_hMA);
    if(g_hMC != INVALID_HANDLE)
       IndicatorRelease(g_hMC);
+   if(g_hAD != INVALID_HANDLE)
+      IndicatorRelease(g_hAD);
   }
 
 //+------------------------------------------------------------------+
@@ -593,6 +622,15 @@ void Entrar(int dir, double fechamento, double inicio)
       return;
      }
 
+   //--- A/D contra o lado da entrada: não manda
+   if(InpUsarAD && g_adSinal != 0 && dir != g_adSinal)
+     {
+      PrintFormat("Entrada de %s ignorada: A/D está %s (%.0f)",
+                  (dir > 0 ? "compra" : "venda"),
+                  (g_adSinal > 0 ? "positivo" : "negativo"), g_adValor);
+      return;
+     }
+
    //--- candle fechado do lado contrário: não manda a limitada
    if(InpCancelaMedia && g_hMC != INVALID_HANDLE)
      {
@@ -667,6 +705,69 @@ void GerirTrailing()
   }
 
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Filtro A/D                                                        |
+//+------------------------------------------------------------------+
+//--- lê o A/D na última barra fechada: +1, -1 ou 0
+int LerAD()
+  {
+   if(!InpUsarAD || g_hAD == INVALID_HANDLE)
+      return 0;
+
+   double v[];
+   ArraySetAsSeries(v, true);
+   if(InpADModo == AD_NIVEL)
+     {
+      if(CopyBuffer(g_hAD, 0, 1, 1, v) < 1)
+         return g_adSinal;
+      g_adValor = v[0];
+     }
+   else
+     {
+      datetime ini = InicioDoDia(TimeCurrent());
+      int n = iBarShift(_Symbol, g_adTF, ini, false);
+      if(n < 1)
+         return g_adSinal;
+      if(CopyBuffer(g_hAD, 0, 1, n, v) < n)
+         return g_adSinal;
+      g_adValor = v[0] - v[n - 1];
+     }
+
+   if(g_adValor > 0)
+      return +1;
+   if(g_adValor < 0)
+      return -1;
+   return 0;
+  }
+
+//--- no fechamento da barra: atualiza o sinal e cancela a limitada do
+//--- lado que deixou de valer quando o A/D troca de sinal
+void AtualizarAD()
+  {
+   if(!InpUsarAD)
+      return;
+   int novo = LerAD();
+   if(novo == 0 || novo == g_adSinal)
+      return;
+
+   int anterior = g_adSinal;
+   g_adSinal = novo;
+   PrintFormat("A/D virou %s (%.0f)",
+               (novo > 0 ? "POSITIVO - só compra" : "NEGATIVO - só venda"), g_adValor);
+
+   if(!InpADCancelar || anterior == 0 || !TemOrdem())
+      return;
+   ENUM_ORDER_TYPE tp = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   int dir = (tp == ORDER_TYPE_BUY_LIMIT || tp == ORDER_TYPE_BUY) ? +1 : -1;
+   if(dir != novo)
+     {
+      CancelarOrdem();
+      g_ordemBarras = 0;
+      PrintFormat("Limitada de %s cancelada: A/D cruzou para %s",
+                  (dir > 0 ? "compra" : "venda"), (novo > 0 ? "positivo" : "negativo"));
+     }
+  }
+
 //--- candle fechou do lado contrário da limitada pendente: cancela
 bool CancelarContraMedia()
   {
@@ -700,6 +801,8 @@ bool CancelarContraMedia()
 //+------------------------------------------------------------------+
 void NovaBarra()
   {
+   AtualizarAD();
+
    // candle contra a média cancela a limitada antes de contar a validade
    if(CancelarContraMedia())
       return;
