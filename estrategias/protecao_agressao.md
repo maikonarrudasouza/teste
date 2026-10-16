@@ -28,6 +28,14 @@ Se os três critérios baterem e a agressão for **contra a mão do robô**, ele
 | P_ZerarPosicao | InpProtZerar | true | Zera a posição |
 | P_SoNoPrejuizo | InpProtSoNoPrejuizo | false | Zera só se estiver perdendo |
 | P_PausaSeg | InpProtPausaSeg | 120 | Segundos sem nova ordem depois de proteger |
+| P_SoAvisar | InpProtSoAvisar | false | TESTE: só escreve no log, não cancela nem zera |
+
+## Modo de teste: medir antes de confiar
+Ligue `P_SoAvisar` (Consenso) ou `InpProtSoAvisar` (Agressão) e deixe um pregão rodando.
+A proteção lê a fita e escreve no log o que **faria** ("SÓ AVISO ... ZERARIA / CANCELARIA"),
+sem mexer em ordem nem em posição. Conte as linhas no fim do dia; o painel do Consenso
+mostra o total do dia separado entre limite e posição. Com esse número você escolhe o
+fator de volume em cima dos seus dados em vez de estimativa.
 
 ## Como calibrar
 - **Protegeu demais / saiu de operações boas**: aumente o fator (3.0 → 4.0) ou o

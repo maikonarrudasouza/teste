@@ -218,6 +218,7 @@ input bool   P_CancelarLimite  = true;   // Cancelar a ordem limite pendente
 input bool   P_ZerarPosicao    = true;   // Zerar a posicao aberta
 input bool   P_SoNoPrejuizo    = false;  // Zerar so se a posicao estiver perdendo
 input int    P_PausaSeg        = 120;    // Segundos sem mandar nova ordem depois de proteger
+input bool   P_SoAvisar        = false;  // TESTE: so escreve no log, nao cancela nem zera
 
 //+------------------------------------------------------------------+
 //| ESTADO                                                           |
@@ -237,6 +238,10 @@ datetime lastBarTime = 0;
 datetime protegidoAte = 0;   // nao manda ordem nova antes dessa hora
 datetime protUltSeg   = 0;   // protecao e lida no maximo 1x por segundo
 double   protFator    = 0;   // ultimo pico de volume lido pela protecao
+int      protAvisos   = 0;   // quantas vezes a protecao disparou hoje
+int      protLimites  = 0;   // dessas, quantas eram ordem limite
+int      protPosicoes = 0;   // dessas, quantas eram posicao aberta
+datetime protDia      = 0;   // dia dos contadores acima
 datetime ordemBarra  = 0;   // barra em que a limite foi enviada
 int      ordemValid  = 0;   // validade dela em barras
 ENUM_ORDER_TYPE_TIME tipoValidade = ORDER_TIME_DAY;
@@ -1208,19 +1213,34 @@ void ProtecaoAgressao()
    int ag = AgressaoAgora(protFator);
    if(ag == 0) return;
 
+   //--- contadores do dia, para medir se ela esta protegendo demais
+   if(Dia(agora) != protDia)
+   {
+      protDia = Dia(agora);
+      protAvisos = 0; protLimites = 0; protPosicoes = 0;
+   }
+
    //--- posicao com a agressao vindo contra
    if(posDir != 0 && ag == -posDir && P_ZerarPosicao)
    {
       double pts = LucroPontos(tPos, posDir);
       if(!(P_SoNoPrejuizo && pts > 0.0))
       {
+         protAvisos++; protPosicoes++;
+         if(P_SoAvisar)
+         {
+            PrintFormat("PROTECAO (SO AVISO %d): agressao %s de %.1fx contra a posicao %s - ZERARIA em %.0f pontos",
+                        protAvisos, (ag > 0 ? "de compra" : "de venda"), protFator,
+                        (posDir > 0 ? "comprada" : "vendida"), pts);
+            return;
+         }
          if(Zerar())
          {
             protegidoAte = agora + P_PausaSeg;
             consDir = 0;
             if(InpLog)
-               PrintFormat("PROTECAO: agressao %s de %.1fx o volume contra a posicao %s - zerado em %.0f pontos",
-                           (ag > 0 ? "de compra" : "de venda"), protFator,
+               PrintFormat("PROTECAO %d: agressao %s de %.1fx o volume contra a posicao %s - zerado em %.0f pontos",
+                           protAvisos, (ag > 0 ? "de compra" : "de venda"), protFator,
                            (posDir > 0 ? "comprada" : "vendida"), pts);
             return;
          }
@@ -1230,12 +1250,20 @@ void ProtecaoAgressao()
    //--- ordem limite pendente que ia ser executada contra o fluxo
    if(ordDir != 0 && ag == -ordDir && P_CancelarLimite)
    {
+      protAvisos++; protLimites++;
+      if(P_SoAvisar)
+      {
+         PrintFormat("PROTECAO (SO AVISO %d): agressao %s de %.1fx contra a limite %s - CANCELARIA a ordem",
+                     protAvisos, (ag > 0 ? "de compra" : "de venda"), protFator,
+                     (ordDir > 0 ? "de compra" : "de venda"));
+         return;
+      }
       CancelarOrdens();
       protegidoAte = agora + P_PausaSeg;
       consDir = 0;
       if(InpLog)
-         PrintFormat("PROTECAO: agressao %s de %.1fx o volume contra a limite %s - ordem cancelada",
-                     (ag > 0 ? "de compra" : "de venda"), protFator,
+         PrintFormat("PROTECAO %d: agressao %s de %.1fx o volume contra a limite %s - ordem cancelada",
+                     protAvisos, (ag > 0 ? "de compra" : "de venda"), protFator,
                      (ordDir > 0 ? "de compra" : "de venda"));
    }
 }
@@ -1548,10 +1576,12 @@ void AtualizarPainel(bool forcar = false)
       cpr = clrGoldenrod;
    }
    else if(protFator <= 0.0)
-      pr = "Protecao ligada | le a fita quando houver ordem ou posicao";
+      pr = StringFormat("Protecao %s | le a fita quando houver ordem ou posicao | hoje: %d",
+                        (P_SoAvisar ? "SO AVISO" : "ligada"), protAvisos);
    else
-      pr = StringFormat("Protecao ligada | agressao agora %.1fx (dispara em %.1fx)",
-                        protFator, P_FatorVolume);
+      pr = StringFormat("Protecao %s | agressao agora %.1fx (dispara em %.1fx) | hoje: %d (%d limite, %d posicao)",
+                        (P_SoAvisar ? "SO AVISO" : "ligada"), protFator, P_FatorVolume,
+                        protAvisos, protLimites, protPosicoes);
    Rotulo("prot", x + 10, yb + 4 * lh, pr, cpr, 8);
 
    ChartRedraw(0);

@@ -69,6 +69,7 @@ input bool            InpProtCancelar     = true;       // Cancelar a ordem limi
 input bool            InpProtZerar        = true;       // Zerar a posição aberta
 input bool            InpProtSoNoPrejuizo = false;      // Zerar só se a posição estiver perdendo
 input int             InpProtPausaSeg     = 120;        // Segundos sem nova entrada depois de proteger
+input bool            InpProtSoAvisar     = false;      // TESTE: só escreve no log, não cancela nem zera
 
 //--- estado
 CTrade   trade;
@@ -78,6 +79,8 @@ int      g_ordemBarras = 0;
 bool     g_avisoFlags  = false;
 datetime g_protegidoAte = 0;   // sem entrada nova antes dessa hora
 datetime g_protUltSeg   = 0;   // protecao lida no maximo 1x por segundo
+int      g_protAvisos   = 0;   // quantas vezes a protecao disparou hoje
+datetime g_protDia      = 0;   // dia dos contadores
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -439,6 +442,12 @@ void ProtecaoAgressao()
    if(ag == 0)
       return;
 
+   if(InicioDoDia(agora) != g_protDia)
+     {
+      g_protDia = InicioDoDia(agora);
+      g_protAvisos = 0;
+     }
+
    //--- posição com a agressão vindo contra
    if(posDir != 0 && ag == -posDir && InpProtZerar)
      {
@@ -452,10 +461,18 @@ void ProtecaoAgressao()
         }
       if(!(InpProtSoNoPrejuizo && pts > 0))
         {
+         g_protAvisos++;
+         if(InpProtSoAvisar)
+           {
+            PrintFormat("PROTEÇÃO (SÓ AVISO %d): agressão %s de %.1fx contra a posição %s - ZERARIA em %.0f pontos",
+                        g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
+                        (posDir > 0 ? "comprada" : "vendida"), pts);
+            return;
+           }
          Zerar();
          g_protegidoAte = agora + InpProtPausaSeg;
-         PrintFormat("PROTEÇÃO: agressão %s de %.1fx o volume contra a posição %s - zerado em %.0f pontos",
-                     (ag > 0 ? "de compra" : "de venda"), fator,
+         PrintFormat("PROTEÇÃO %d: agressão %s de %.1fx o volume contra a posição %s - zerado em %.0f pontos",
+                     g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
                      (posDir > 0 ? "comprada" : "vendida"), pts);
          return;
         }
@@ -464,11 +481,19 @@ void ProtecaoAgressao()
    //--- ordem limitada que ia ser executada contra o fluxo
    if(ordDir != 0 && ag == -ordDir && InpProtCancelar)
      {
+      g_protAvisos++;
+      if(InpProtSoAvisar)
+        {
+         PrintFormat("PROTEÇÃO (SÓ AVISO %d): agressão %s de %.1fx contra a limitada %s - CANCELARIA a ordem",
+                     g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
+                     (ordDir > 0 ? "de compra" : "de venda"));
+         return;
+        }
       CancelarOrdem();
       g_ordemBarras = 0;
       g_protegidoAte = agora + InpProtPausaSeg;
-      PrintFormat("PROTEÇÃO: agressão %s de %.1fx o volume contra a limitada %s - ordem cancelada",
-                  (ag > 0 ? "de compra" : "de venda"), fator,
+      PrintFormat("PROTEÇÃO %d: agressão %s de %.1fx o volume contra a limitada %s - ordem cancelada",
+                  g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
                   (ordDir > 0 ? "de compra" : "de venda"));
      }
   }
