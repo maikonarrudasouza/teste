@@ -72,7 +72,7 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.12"
+#property version   "1.13"
 
 #include <Trade\Trade.mqh>
 
@@ -221,6 +221,32 @@ input double A_DominioPct      = 70;
 input int    A_MediaN          = 30;
 input bool   A_ExigirSustentar = true;
 
+//==================================================================
+//  FILTRO A/D (Accumulation/Distribution)
+//  A/D positivo: so compra. A/D negativo: so venda.
+//  Quando o A/D troca de sinal, a ordem limite do lado que deixou
+//  de valer e cancelada.
+//==================================================================
+input group "Filtro A/D (Accumulation/Distribution)"
+input bool            AD_Usar    = true;              // Ligar o filtro
+input ENUM_TIMEFRAMES AD_TF      = PERIOD_M1;         // Timeframe do indicador
+input ENUM_APPLIED_VOLUME AD_Vol = VOLUME_REAL;       // Volume usado (Real, como no indicador)
+input EModoAD         AD_Modo    = AD_NIVEL;          // Nivel zero ou saldo do dia
+input bool            AD_Cancelar= true;              // Cruzou o zero: cancela a limite do lado contrario
+
+//==================================================================
+//  CANCELAR A LIMITE POR AGRESSAO CONTRA
+//  Enquanto existe ordem limite pendente, le os ultimos X_JanelaSeg
+//  segundos de negocios. Se vier uma rajada dominada CONTRA o lado da
+//  ordem, cancela a ordem. So isso: nao mexe em posicao aberta.
+//==================================================================
+input group "Cancelar a limite por agressao contra"
+input bool   X_Usar        = false;  // Ligar a regra
+input int    X_JanelaSeg   = 10;     // Janela de leitura (segundos)
+input double X_FatorVolume = 3.0;    // Volume da janela >= fator x volume normal
+input double X_DominioPct  = 75;     // % do volume agredido de um lado
+input int    X_NiveisMin   = 3;      // Niveis (ticks) que o preco andou contra
+
 //+------------------------------------------------------------------+
 //| ESTADO                                                           |
 //+------------------------------------------------------------------+
@@ -247,6 +273,10 @@ datetime consChave = 0;
 int      hMA  = INVALID_HANDLE;
 int      hAD  = INVALID_HANDLE;   // Accumulation/Distribution
 int      adSinal     = 0;         // +1 positivo, -1 negativo, 0 indefinido
+double   xFator      = 0.0;       // agressao lida agora, em x o volume normal
+datetime xUltSeg     = 0;         // leitura no maximo 1x por segundo
+datetime xBloqBarra  = 0;         // barra em que a limite foi cancelada
+int      xBloqDir    = 0;         // lado cancelado nessa barra
 double   adValor     = 0.0;       // ultimo valor lido
 int      hATR = INVALID_HANDLE;
 int      fitaSinaisAtivos = 0;
@@ -1129,6 +1159,10 @@ int VotoAgressao()
 
 bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
 {
+   //--- rajada cancelou esta mesma ordem nesta barra: nao recoloca
+   if(X_Usar && xBloqDir == dir && xBloqBarra == iTime(_Symbol, PERIOD_M1, 0))
+      return false;
+
    //--- A/D contra o lado da ordem: nao manda
    if(AD_Usar && adSinal != 0 && dir != adSinal)
    {
@@ -1226,6 +1260,95 @@ bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
                      dir > 0 ? "COMPRA" : "VENDA", preco, nVotos, valid, stop, alvo);
    }
    return true;
+}
+
+//+==================================================================+
+//| AGRESSAO CONTRA A ORDEM PENDENTE                                 |
+//+==================================================================+
+//--- agressao dos ultimos X_JanelaSeg segundos ate agora: +1, -1 ou 0
+int AgressaoAgora(double &fator)
+{
+   fator = 0.0;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 1, A_MediaN, r) < A_MediaN) return 0;
+   double soma = 0;
+   for(int k = 0; k < A_MediaN; k++) soma += VolBar(r[k]);
+   double volNormal = soma / A_MediaN;                 // volume de uma barra M1
+   if(volNormal <= 0) return 0;
+   double volJanela = volNormal * X_JanelaSeg / 60.0;
+   if(volJanela <= 0) return 0;
+
+   MqlTick tk[];
+   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
+   ulong de  = ate - (ulong)X_JanelaSeg * 1000;
+   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
+   if(n < 2) return 0;
+
+   bool temFlags = false;
+   for(int i = 0; i < n && !temFlags; i++)
+      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0) temFlags = true;
+
+   double vc = 0, vv = 0;
+   double p0 = tk[0].last, mx = p0, mn = p0;
+   int    ultimo = 0;
+   for(int i = 0; i < n; i++)
+   {
+      int l = 0;
+      if(temFlags)
+      {
+         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
+         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
+         l = (b && !v) ? 1 : (v && !b) ? -1 : 0;
+      }
+      else if(i > 0)
+      {
+         l = (tk[i].last > tk[i-1].last) ? 1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
+         ultimo = l;
+      }
+      double vol = VolTick(tk[i]);
+      if(l > 0) vc += vol;
+      if(l < 0) vv += vol;
+      if(tk[i].last > 0.0) { mx = MathMax(mx, tk[i].last); mn = MathMin(mn, tk[i].last); }
+   }
+
+   double total = vc + vv;
+   fator = total / volJanela;
+   if(total <= 0 || total < X_FatorVolume * volJanela) return 0;
+
+   double niveis = X_NiveisMin * TickSz();
+   if(vc >= X_DominioPct / 100.0 * total && mx - p0 >= niveis - TickSz() / 2) return  1;
+   if(vv >= X_DominioPct / 100.0 * total && p0 - mn >= niveis - TickSz() / 2) return -1;
+   return 0;
+}
+
+//--- rajada contra a ordem pendente: cancela a ordem, e so isso
+void CancelarPorAgressao()
+{
+   if(!X_Usar) return;
+
+   ulong t;
+   int dir = OrdemDir(t);
+   if(dir == 0) { xFator = 0.0; return; }
+
+   datetime agora = TimeCurrent();
+   if(agora == xUltSeg) return;
+   xUltSeg = agora;
+
+   int ag = AgressaoAgora(xFator);
+   if(ag == 0 || ag != -dir) return;
+
+   if(trade.OrderDelete(t))
+   {
+      ordemBarra = 0;
+      //--- nao recoloca a mesma ordem nesta barra
+      xBloqBarra = iTime(_Symbol, PERIOD_M1, 0);
+      xBloqDir   = dir;
+      if(InpLog)
+         PrintFormat("Limite de %s cancelada: agressao %s de %.1fx o volume contra ela",
+                     (dir > 0 ? "compra" : "venda"),
+                     (ag > 0 ? "de compra" : "de venda"), xFator);
+   }
 }
 
 //+==================================================================+
@@ -1495,6 +1618,8 @@ void AtualizarPainel(bool forcar = false)
       else if(adSinal < 0) { pr = StringFormat("A/D NEGATIVO (%.0f) - so venda",  adValor); cpr = InpCorVenda;  }
       else                   pr = "A/D: aguardando a primeira barra fechada";
    }
+   if(X_Usar)
+      pr += StringFormat("  |  rajada %.1fx (cancela em %.1fx)", xFator, X_FatorVolume);
    Rotulo("prot", x + 10, yb + 4 * lh, pr, cpr, 8);
 
    ChartRedraw(0);
@@ -1607,6 +1732,9 @@ void OnTick()
       AtualizarPainel();
       return;
    }
+
+   //--- rajada contra a ordem pendente
+   CancelarPorAgressao();
 
    //--- Fita: avaliada no maximo 1x por segundo
    bool votouAgora = false;

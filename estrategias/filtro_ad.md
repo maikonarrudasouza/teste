@@ -41,3 +41,32 @@ está no histórico do repositório (commits `32c2e0c` e `e327199`).
 
 O filtro de tendência por média (`InpUsarFiltroTend` no Agressão, `D_FiltroTend` e
 `F_FiltroTend` no Consenso) continua existindo: é outra coisa, e não foi mexido.
+
+# Cancelar a limite por agressão contra (opcional)
+
+Consenso_WIN v1.13 e Agressao_WIN v1.08. Vem **desligada**.
+
+Enquanto existe ordem limite pendente, o robô lê uma vez por segundo os últimos
+10 segundos de negócios. Se vier uma rajada **contra o lado da ordem** — volume da
+janela acima do normal, dominada de um lado e com o preço andando naquele sentido —
+a ordem é cancelada. Só isso:
+
+- não mexe em posição aberta;
+- não tem pausa; o único bloqueio é não recolocar a mesma ordem naquela barra.
+
+A ideia é que cancelar ordem pendente é barato: nada foi aberto, nada foi realizado,
+e o sinal volta na barra seguinte se ainda fizer sentido. O pior caso é perder uma
+entrada.
+
+| Consenso_WIN | Agressao_WIN | Padrão |
+|---|---|---|
+| X_Usar | InpUsarRajada | false |
+| X_JanelaSeg | InpRajJanelaSeg | 10 s |
+| X_FatorVolume | InpRajFator | 3.0 |
+| X_DominioPct | InpRajDominioPct | 75% |
+| X_NiveisMin | InpRajNiveis | 3 (15 pontos) |
+
+Ela convive com o filtro A/D sem conflito: o A/D decide de que lado operar, antes de
+a ordem existir; a rajada decide se aquela ordem específica ainda deve ser executada.
+No painel do Consenso, quando ligada, a linha do A/D passa a mostrar também a rajada
+atual em "x o volume normal".

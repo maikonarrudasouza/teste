@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.07"
+#property version     "1.08"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -90,6 +90,13 @@ input ENUM_APPLIED_VOLUME InpADVol        = VOLUME_REAL;     // Volume usado (Re
 input EModoAD         InpADModo           = AD_NIVEL;        // Nível zero ou saldo do dia
 input bool            InpADCancelar       = true;            // Cruzou o zero: cancela a limitada do lado contrário
 
+input group "Cancelar a limitada por agressão contra"
+input bool            InpUsarRajada       = false;    // Ligar a regra
+input int             InpRajJanelaSeg     = 10;       // Janela de leitura (segundos)
+input double          InpRajFator         = 3.0;      // Volume da janela >= fator x volume normal
+input double          InpRajDominioPct    = 75;       // % do volume agredido de um lado
+input int             InpRajNiveis        = 3;        // Níveis (ticks) que o preço andou contra
+
 //--- estado
 CTrade   trade;
 datetime g_ultimaBarra = 0;
@@ -100,6 +107,10 @@ int      g_hMA          = INVALID_HANDLE;
 int      g_hAD          = INVALID_HANDLE;   // Accumulation/Distribution
 ENUM_TIMEFRAMES g_adTF  = PERIOD_CURRENT;
 int      g_adSinal      = 0;                // +1 positivo, -1 negativo
+double   g_rajFator     = 0;                // rajada lida agora, em x o volume normal
+datetime g_rajUltSeg    = 0;                // leitura no máximo 1x por segundo
+datetime g_rajBloqBarra = 0;                // barra em que a limitada foi cancelada
+int      g_rajBloqDir   = 0;                // lado cancelado nessa barra
 double   g_adValor      = 0;
 
 //+------------------------------------------------------------------+
@@ -407,6 +418,10 @@ int Agressao(const MqlRates &barra, double volNormalBarra, double &inicio)
 //+------------------------------------------------------------------+
 void Entrar(int dir, double fechamento, double inicio)
   {
+   //--- a rajada cancelou esta mesma ordem nesta barra: não recoloca
+   if(InpUsarRajada && g_rajBloqDir == dir && g_rajBloqBarra == iTime(_Symbol, InpTF, 0))
+      return;
+
    //--- A/D contra o lado da entrada: não manda
    if(InpUsarAD && g_adSinal != 0 && dir != g_adSinal)
      {
@@ -471,6 +486,113 @@ void GerirTrailing()
   }
 
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Rajada contra a ordem pendente                                    |
+//+------------------------------------------------------------------+
+//--- agressão dos últimos InpRajJanelaSeg segundos: +1, -1 ou 0
+int RajadaAgora(double &fator)
+  {
+   fator = 0;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, 1, InpMediaN, r) < InpMediaN)
+      return 0;
+   double soma = 0;
+   for(int k = 0; k < InpMediaN; k++)
+      soma += Vol(r[k]);
+   double volNormalBarra = soma / InpMediaN;
+   if(volNormalBarra <= 0)
+      return 0;
+   double volJanela = volNormalBarra * InpRajJanelaSeg / (double)PeriodSeconds(InpTF);
+   if(volJanela <= 0)
+      return 0;
+
+   MqlTick tk[];
+   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
+   ulong de  = ate - (ulong)InpRajJanelaSeg * 1000;
+   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
+   if(n < 2)
+      return 0;
+
+   bool temFlags = false;
+   for(int i = 0; i < n && !temFlags; i++)
+      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0)
+         temFlags = true;
+
+   double vc = 0, vv = 0;
+   double p0 = tk[0].last, mx = p0, mn = p0;
+   int    ultimo = 0;
+   for(int i = 0; i < n; i++)
+     {
+      int l = 0;
+      if(temFlags)
+        {
+         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
+         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
+         l = (b && !v) ? +1 : (v && !b) ? -1 : 0;
+        }
+      else
+         if(i > 0)
+           {
+            l = (tk[i].last > tk[i-1].last) ? +1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
+            ultimo = l;
+           }
+      double vol = VolTick(tk[i]);
+      if(l > 0)
+         vc += vol;
+      if(l < 0)
+         vv += vol;
+      if(tk[i].last > 0)
+        {
+         mx = MathMax(mx, tk[i].last);
+         mn = MathMin(mn, tk[i].last);
+        }
+     }
+
+   double total = vc + vv;
+   fator = total / volJanela;
+   if(total <= 0 || total < InpRajFator * volJanela)
+      return 0;
+
+   double niveis = InpRajNiveis * Tick();
+   if(vc >= InpRajDominioPct / 100.0 * total && mx - p0 >= niveis - Tick() / 2)
+      return +1;
+   if(vv >= InpRajDominioPct / 100.0 * total && p0 - mn >= niveis - Tick() / 2)
+      return -1;
+   return 0;
+  }
+
+//--- rajada contra a limitada pendente: cancela a ordem, e só isso
+void CancelarPorRajada()
+  {
+   if(!InpUsarRajada || !TemOrdem())
+     {
+      if(!TemOrdem())
+         g_rajFator = 0;
+      return;
+     }
+
+   datetime agora = TimeCurrent();
+   if(agora == g_rajUltSeg)
+      return;
+   g_rajUltSeg = agora;
+
+   ENUM_ORDER_TYPE tp = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   int dir = (tp == ORDER_TYPE_BUY_LIMIT || tp == ORDER_TYPE_BUY) ? +1 : -1;
+
+   int ag = RajadaAgora(g_rajFator);
+   if(ag == 0 || ag != -dir)
+      return;
+
+   CancelarOrdem();
+   g_ordemBarras = 0;
+   g_rajBloqBarra = iTime(_Symbol, InpTF, 0);
+   g_rajBloqDir   = dir;
+   PrintFormat("Limitada de %s cancelada: agressão %s de %.1fx o volume contra ela",
+               (dir > 0 ? "compra" : "venda"),
+               (ag > 0 ? "de compra" : "de venda"), g_rajFator);
+  }
+
 //+------------------------------------------------------------------+
 //| Filtro A/D                                                        |
 //+------------------------------------------------------------------+
@@ -607,6 +729,7 @@ void OnTick()
       return;
      }
 
+   CancelarPorRajada();
    GerirTrailing();
 
    datetime barra = iTime(_Symbol, InpTF, 0);
