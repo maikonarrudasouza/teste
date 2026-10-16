@@ -245,7 +245,7 @@ input bool   X_Usar        = false;  // Ligar a regra
 input int    X_JanelaSeg   = 10;     // Janela de leitura (segundos)
 input double X_FatorVolume = 3.0;    // Volume da janela >= fator x volume normal
 input double X_DominioPct  = 75;     // % do volume agredido de um lado
-input int    X_NiveisMin   = 3;      // Niveis (ticks) que o preco andou contra
+input int    X_NiveisMin   = 22;     // Niveis (ticks) que o preco andou contra (22 x 5 = 110 pts)
 
 //+------------------------------------------------------------------+
 //| ESTADO                                                           |

@@ -64,7 +64,7 @@ entrada.
 | X_JanelaSeg | InpRajJanelaSeg | 10 s |
 | X_FatorVolume | InpRajFator | 3.0 |
 | X_DominioPct | InpRajDominioPct | 75% |
-| X_NiveisMin | InpRajNiveis | 3 (15 pontos) |
+| X_NiveisMin | InpRajNiveis | 22 (110 pontos) |
 
 Ela convive com o filtro A/D sem conflito: o A/D decide de que lado operar, antes de
 a ordem existir; a rajada decide se aquela ordem específica ainda deve ser executada.

@@ -166,7 +166,7 @@ input bool   InpRajUsar       = true;   // Ligar a regra
 input int    InpRajJanelaSeg  = 10;     // Janela de leitura (segundos)
 input double InpRajFator      = 3.0;    // Volume da janela >= fator x volume normal
 input double InpRajDominioPct = 75;     // % do volume agredido de um lado
-input int    InpRajNiveis     = 10;     // Niveis (ticks) que o preco andou contra
+input int    InpRajNiveis     = 22;     // Niveis (ticks) que o preco andou contra (22 x 5 = 110 pts)
 input int    InpRajMediaN     = 30;     // Barras M1 para medir o volume normal
 
 //--- estado da regra de cancelamento por agressao

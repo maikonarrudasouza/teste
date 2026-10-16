@@ -95,7 +95,7 @@ input bool            InpUsarRajada       = false;    // Ligar a regra
 input int             InpRajJanelaSeg     = 10;       // Janela de leitura (segundos)
 input double          InpRajFator         = 3.0;      // Volume da janela >= fator x volume normal
 input double          InpRajDominioPct    = 75;       // % do volume agredido de um lado
-input int             InpRajNiveis        = 3;        // Níveis (ticks) que o preço andou contra
+input int             InpRajNiveis        = 22;       // Níveis (ticks) que o preço andou contra (22 x 5 = 110 pts)
 
 //--- estado
 CTrade   trade;
