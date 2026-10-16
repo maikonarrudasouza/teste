@@ -53,3 +53,30 @@ No Agressao_WIN tudo sai no log do Expert ("PROTEÇÃO: ...").
 A leitura depende de o símbolo entregar o lado agressor nos ticks. Sem isso o robô
 cai na regra do tick (subiu = compra, caiu = venda), que é mais grosseira mas
 funciona para medir volume e deslocamento.
+
+# Filtro de tendência com média adaptativa (AMA)
+
+Os dois robôs aceitam agora duas médias no filtro de tendência:
+
+- `MEDIA_COMUM`: média normal (EMA 50 por padrão, no fechamento). É o padrão.
+- `MEDIA_ADAPTATIVA`: a AMA/KAMA, com os mesmos campos da janela do MetaTrader —
+  período, EMA rápida, EMA lenta e preço aplicado. Os padrões já vêm 1 / 6 / 30
+  com Weighted Close (HLCC/4).
+
+| Consenso_WIN | Agressao_WIN | Padrão |
+|---|---|---|
+| T_Tipo | InpMATipo | MEDIA_COMUM |
+| T_Preco | InpMAPreco | PRICE_WEIGHTED (só vale para a AMA) |
+| T_AMA_Per | InpAMAPeriodo | 1 |
+| T_AMA_Rap | InpAMARapida | 6 |
+| T_AMA_Len | InpAMALenta | 30 |
+| T_TF | InpTFTendencia | M5 |
+| T_DistMin | InpMADistMin | 25 pontos |
+
+A média comum continua usando o fechamento, para não mudar o comportamento de
+quem já estava rodando com ela.
+
+Cuidado com o período 1: a AMA assim fica muito colada no preço, então ela filtra
+pouco. Ela barra entrada contra o movimento imediato, não contra a tendência do dia.
+Se quiser que ela segure mais, aumente a zona neutra (25 para 50 pontos) ou suba o
+tempo gráfico do filtro.

@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.03"
+#property version     "1.04"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -59,12 +59,23 @@ input int             InpMaxOperacoesDia  = 6;          // Máximo de entradas p
 input double          InpPerdaMaxDia      = 300;        // Perda máxima do dia em R$ (0 = sem limite)
 input int             InpPerdasSeguidas   = 3;          // Para no dia após N perdas seguidas (0 = não)
 
+enum ETipoMedia
+  {
+   MEDIA_COMUM      = 0,   // Média comum (EMA, SMA...)
+   MEDIA_ADAPTATIVA = 1    // Média adaptativa (AMA/KAMA)
+  };
+
 input group "Filtro de tendência"
 input bool            InpUsarFiltroTend   = false;      // Só operar a favor da média (desligado por padrão)
 input ENUM_TIMEFRAMES InpTFTendencia      = PERIOD_M5;  // Tempo gráfico da média
 input int             InpMAPeriodo        = 50;         // Período da média
 input ENUM_MA_METHOD  InpMAMetodo         = MODE_EMA;   // Método da média
 input int             InpMADistMin        = 25;         // Zona neutra em volta da média (pontos)
+input ETipoMedia      InpMATipo           = MEDIA_COMUM;    // Tipo de média do filtro
+input ENUM_APPLIED_PRICE InpMAPreco       = PRICE_WEIGHTED; // Preço aplicado da AMA (WEIGHTED = HLCC/4)
+input int             InpAMAPeriodo       = 1;          // AMA: período
+input int             InpAMARapida        = 6;          // AMA: EMA rápida
+input int             InpAMALenta         = 30;         // AMA: EMA lenta
 
 input group "Proteção contra agressão"
 input bool            InpProtecao         = true;       // Cancelar/zerar quando a agressão vem contra
@@ -95,7 +106,10 @@ int OnInit()
   {
    if(InpUsarFiltroTend)
      {
-      g_hMA = iMA(_Symbol, InpTFTendencia, InpMAPeriodo, 0, InpMAMetodo, PRICE_CLOSE);
+      if(InpMATipo == MEDIA_ADAPTATIVA)
+         g_hMA = iAMA(_Symbol, InpTFTendencia, InpAMAPeriodo, InpAMARapida, InpAMALenta, 0, InpMAPreco);
+      else
+         g_hMA = iMA(_Symbol, InpTFTendencia, InpMAPeriodo, 0, InpMAMetodo, PRICE_CLOSE);
       if(g_hMA == INVALID_HANDLE)
         {
          Print("Falha ao criar a média do filtro de tendência.");

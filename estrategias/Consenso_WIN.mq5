@@ -70,13 +70,19 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.08"
+#property version   "1.09"
 
 #include <Trade\Trade.mqh>
 
 //==================================================================
 //  CONSENSO E ORDEM
 //==================================================================
+enum ETipoMedia
+{
+   MEDIA_COMUM      = 0,   // Media comum (MODE_EMA, MODE_SMA...)
+   MEDIA_ADAPTATIVA = 1    // Media adaptativa (AMA/KAMA)
+};
+
 enum EModoPreco
 {
    PRECO_FECHAMENTO = 0,   // Compra: fechamento - dist | Venda: fechamento + dist
@@ -131,6 +137,11 @@ input ENUM_TIMEFRAMES T_TF       = PERIOD_M5;   // Timeframe da media (.set: TFT
 input int             T_Periodo  = 50;          // Periodo da media
 input ENUM_MA_METHOD  T_Metodo   = MODE_EMA;    // Metodo da media
 input int             T_DistMin  = 25;          // Zona neutra (pontos) - o mais folgado dos .set
+input ETipoMedia      T_Tipo     = MEDIA_COMUM;  // Tipo de media do filtro
+input ENUM_APPLIED_PRICE T_Preco = PRICE_WEIGHTED; // Preco aplicado da AMA (WEIGHTED = HLCC/4)
+input int             T_AMA_Per  = 1;           // AMA: periodo
+input int             T_AMA_Rap  = 6;           // AMA: EMA rapida
+input int             T_AMA_Len  = 30;          // AMA: EMA lenta
 
 input group "Modo cauteloso (VP e Fita)"
 input int    C_JanelaMin = 30;    // Janela de leitura (minutos)
@@ -354,8 +365,11 @@ int OnInit()
 
    if((InpUsarDelta && D_FiltroTend) || (InpUsarFita && F_FiltroTend))
    {
-      hMA = iMA(_Symbol, T_TF, T_Periodo, 0, T_Metodo, PRICE_CLOSE);
-      if(hMA == INVALID_HANDLE) { Print("Falha ao criar a media"); return INIT_FAILED; }
+      if(T_Tipo == MEDIA_ADAPTATIVA)
+         hMA = iAMA(_Symbol, T_TF, T_AMA_Per, T_AMA_Rap, T_AMA_Len, 0, T_Preco);
+      else
+         hMA = iMA(_Symbol, T_TF, T_Periodo, 0, T_Metodo, PRICE_CLOSE);
+      if(hMA == INVALID_HANDLE) { Print("Falha ao criar a media do filtro"); return INIT_FAILED; }
    }
    if(InpUsarVP)
    {
