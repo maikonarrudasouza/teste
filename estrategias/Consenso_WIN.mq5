@@ -70,7 +70,7 @@
 //|          na hora, usando o preco do momento como referencia.      |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.09"
+#property version   "1.10"
 
 #include <Trade\Trade.mqh>
 
@@ -219,8 +219,27 @@ input bool   A_ExigirSustentar = true;
 //  agressao estourar o volume normal e vier dominada contra a mao
 //  do robo, cancela a limite pendente e/ou zera a posicao.
 //==================================================================
+//==================================================================
+//  CANCELAR A LIMITE PELA MEDIA
+//  No fechamento de cada barra: se o candle fechou do lado contrario
+//  da media, a ordem limite pendente daquele lado e cancelada.
+//  Candle fechou ACIMA da media e a ordem e de VENDA  -> cancela.
+//  Candle fechou ABAIXO da media e a ordem e de COMPRA -> cancela.
+//==================================================================
+input group "Cancelar a limite pela media"
+input bool            M_Usar     = true;             // Ligar a regra
+input ENUM_TIMEFRAMES M_TF       = PERIOD_M1;        // Timeframe do candle e da media
+input ETipoMedia      M_Tipo     = MEDIA_ADAPTATIVA; // Tipo de media
+input ENUM_APPLIED_PRICE M_Preco = PRICE_WEIGHTED;   // Preco aplicado (WEIGHTED = HLCC/4)
+input int             M_AMA_Per  = 1;                // AMA: periodo
+input int             M_AMA_Rap  = 6;                // AMA: EMA rapida
+input int             M_AMA_Len  = 30;               // AMA: EMA lenta
+input int             M_Periodo  = 50;               // Media comum: periodo
+input ENUM_MA_METHOD  M_Metodo   = MODE_EMA;         // Media comum: metodo
+input int             M_Folga    = 0;                // Folga alem da media (pontos)
+
 input group "Protecao contra agressao"
-input bool   P_Usar            = true;   // Ligar a protecao
+input bool   P_Usar            = false;  // Ligar a protecao (desligada: o pedido era so a regra da media)
 input int    P_JanelaSeg       = 10;     // Janela de leitura (segundos)
 input double P_FatorVolume     = 3.0;    // Volume da janela >= fator x volume normal
 input double P_DominioPct      = 75;     // % do volume agredido de um lado
@@ -262,6 +281,7 @@ int      consDir   = 0;
 datetime consChave = 0;
 
 int      hMA  = INVALID_HANDLE;
+int      hMC  = INVALID_HANDLE;   // media que cancela a limite
 int      hATR = INVALID_HANDLE;
 int      fitaSinaisAtivos = 0;
 
@@ -371,6 +391,14 @@ int OnInit()
          hMA = iMA(_Symbol, T_TF, T_Periodo, 0, T_Metodo, PRICE_CLOSE);
       if(hMA == INVALID_HANDLE) { Print("Falha ao criar a media do filtro"); return INIT_FAILED; }
    }
+   if(M_Usar)
+   {
+      if(M_Tipo == MEDIA_ADAPTATIVA)
+         hMC = iAMA(_Symbol, M_TF, M_AMA_Per, M_AMA_Rap, M_AMA_Len, 0, M_Preco);
+      else
+         hMC = iMA(_Symbol, M_TF, M_Periodo, 0, M_Metodo, PRICE_CLOSE);
+      if(hMC == INVALID_HANDLE) { Print("Falha ao criar a media que cancela a limite"); return INIT_FAILED; }
+   }
    if(InpUsarVP)
    {
       hATR = iATR(_Symbol, PERIOD_M1, 14);
@@ -416,6 +444,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    if(hMA  != INVALID_HANDLE) IndicatorRelease(hMA);
+   if(hMC  != INVALID_HANDLE) IndicatorRelease(hMC);
    if(hATR != INVALID_HANDLE) IndicatorRelease(hATR);
    ObjectsDeleteAll(0, PFX);
    ChartRedraw(0);
@@ -1285,10 +1314,23 @@ void ProtecaoAgressao()
 //+==================================================================+
 //| ORDEM                                                            |
 //+==================================================================+
+bool CandleContra(int dir, double &c1, double &media);   // definida mais abaixo
+
 bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
 {
    //--- acabou de proteger: fica de fora pelo tempo da pausa
    if(P_Usar && P_PausaSeg > 0 && TimeCurrent() < protegidoAte) return false;
+
+   //--- candle fechado contra o lado da ordem: nao manda
+   double cc, mm;
+   if(CandleContra(dir, cc, mm))
+   {
+      if(InpLog)
+         PrintFormat("Limite de %s nao enviada: candle fechou em %.0f, %s media (%.0f)",
+                     (dir > 0 ? "compra" : "venda"), cc,
+                     (dir < 0 ? "acima da" : "abaixo da"), mm);
+      return false;
+   }
 
    double c1 = iClose(_Symbol, PERIOD_M1, 1);
    double h1 = iHigh(_Symbol,  PERIOD_M1, 1);
@@ -1377,6 +1419,45 @@ bool EnviarLimite(int dir, int nVotos, bool intrabar = false)
                      dir > 0 ? "COMPRA" : "VENDA", preco, nVotos, valid, stop, alvo);
    }
    return true;
+}
+
+//--- true se o ultimo candle fechado esta do lado contrario de dir
+//--- (fechou acima da media e dir e venda, ou abaixo e dir e compra)
+bool CandleContra(int dir, double &c1, double &media)
+{
+   c1 = 0.0; media = 0.0;
+   if(!M_Usar || hMC == INVALID_HANDLE || dir == 0) return false;
+
+   double ma[];
+   ArraySetAsSeries(ma, true);
+   if(CopyBuffer(hMC, 0, 1, 1, ma) < 1 || ma[0] <= 0.0) return false;
+   double c = iClose(_Symbol, M_TF, 1);
+   if(c <= 0.0) return false;
+
+   c1 = c; media = ma[0];
+   double folga = M_Folga * _Point;
+   return (dir < 0 && c > ma[0] + folga) ||
+          (dir > 0 && c < ma[0] - folga);
+}
+
+//--- candle fechou do lado contrario da ordem pendente: cancela
+void CancelarContraMedia()
+{
+   ulong t;
+   int dir = OrdemDir(t);
+   if(dir == 0) return;
+
+   double c1, media;
+   if(!CandleContra(dir, c1, media)) return;
+
+   if(trade.OrderDelete(t))
+   {
+      ordemBarra = 0;
+      if(InpLog)
+         PrintFormat("Limite de %s cancelada: candle fechou em %.0f, %s media (%.0f)",
+                     (dir > 0 ? "compra" : "venda"), c1,
+                     (dir < 0 ? "acima da" : "abaixo da"), media);
+   }
 }
 
 void CancelarVencida()
@@ -1638,6 +1719,7 @@ void NovaBarra()
    if(InpUsarVP)       RegistrarVoto(2, VotoVP(),       b1);
    if(InpUsarAgressao) RegistrarVoto(3, VotoAgressao(), b1);
 
+   CancelarContraMedia();
    CancelarVencida();
    AvaliarConsenso(false);
 }

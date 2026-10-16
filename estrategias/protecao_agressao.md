@@ -1,4 +1,37 @@
-# Proteção contra agressão (Consenso_WIN v1.08 e Agressao_WIN v1.02)
+# Cancelar a limite pela média (regra principal)
+
+No fechamento de cada barra, se o candle fechou do lado contrário da ordem limite
+pendente, a ordem é cancelada:
+
+- candle fechou **acima** da média e a ordem é de **venda** → cancela;
+- candle fechou **abaixo** da média e a ordem é de **compra** → cancela.
+
+Enquanto o último candle fechado estiver desse lado, o robô também **não manda**
+ordem nova daquele lado. Sem isso o consenso recolocaria a mesma venda no tick
+seguinte e o cancelamento não valeria de nada.
+
+A regra só mexe em ordem pendente. Posição aberta não é tocada: ela segue com
+stop, alvo e trailing normais.
+
+| Consenso_WIN | Agressao_WIN | Padrão | O que é |
+|---|---|---|---|
+| M_Usar | InpCancelaMedia | true | Liga a regra |
+| M_TF | InpMCTF | M1 / o do robô | Timeframe do candle e da média |
+| M_Tipo | InpMCTipo | MEDIA_ADAPTATIVA | AMA ou média comum |
+| M_Preco | InpMCPreco | PRICE_WEIGHTED | HLCC/4, como na janela do MetaTrader |
+| M_AMA_Per | InpMCAMAPeriodo | 1 | AMA: período |
+| M_AMA_Rap | InpMCAMARapida | 6 | AMA: EMA rápida |
+| M_AMA_Len | InpMCAMALenta | 30 | AMA: EMA lenta |
+| M_Periodo / M_Metodo | InpMCPeriodo / InpMCMetodo | 50 / EMA | Usados só com MEDIA_COMUM |
+| M_Folga | InpMCFolga | 0 | Pontos além da média para valer o cancelamento |
+
+Se a média ficar colada demais no preço e cancelar ordem boa, aumente a folga
+(0 para 20 ou 30 pontos) em vez de mexer na AMA.
+
+# Proteção contra agressão (opcional, DESLIGADA por padrão)
+
+Esta parte não é a regra da média acima. Ela existe no código mas vem desligada
+(`P_Usar = false`, `InpProtecao = false`); ligue só se quiser testar.
 
 ## O que ela faz
 A cada segundo, enquanto existe ordem limite pendente ou posição aberta, o robô lê
