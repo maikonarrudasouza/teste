@@ -17,7 +17,7 @@
 //|  sem aumento de mão, zera no fim do dia.                          |
 //+------------------------------------------------------------------+
 #property copyright   "maikon arruda"
-#property version     "1.06"
+#property version     "1.07"
 #property description "Agressão no Times & Trades (Guia do Tape Reading) para WIN (B3)"
 
 #include <Trade/Trade.mqh>
@@ -90,47 +90,17 @@ input ENUM_APPLIED_VOLUME InpADVol        = VOLUME_REAL;     // Volume usado (Re
 input EModoAD         InpADModo           = AD_NIVEL;        // Nível zero ou saldo do dia
 input bool            InpADCancelar       = true;            // Cruzou o zero: cancela a limitada do lado contrário
 
-input group "Cancelar a limitada pela média"
-input bool            InpCancelaMedia     = false;          // Cancela a limitada do lado contrário à média (desligada: o filtro agora é o A/D)
-input ENUM_TIMEFRAMES InpMCTF             = PERIOD_CURRENT; // Timeframe do candle e da média (CURRENT = o do robô)
-input ETipoMedia      InpMCTipo           = MEDIA_ADAPTATIVA; // Tipo de média
-input ENUM_APPLIED_PRICE InpMCPreco       = PRICE_WEIGHTED;   // Preço aplicado (WEIGHTED = HLCC/4)
-input int             InpMCAMAPeriodo     = 1;           // AMA: período
-input int             InpMCAMARapida      = 6;           // AMA: EMA rápida
-input int             InpMCAMALenta       = 30;          // AMA: EMA lenta
-input int             InpMCPeriodo        = 50;          // Média comum: período
-input ENUM_MA_METHOD  InpMCMetodo         = MODE_EMA;    // Média comum: método
-input int             InpMCFolga          = 0;           // Folga além da média (pontos)
-
-input group "Proteção contra agressão"
-input bool            InpProtecao         = false;      // Cancelar/zerar quando a agressão vem contra (desligada)
-input int             InpProtJanelaSeg    = 10;         // Janela de leitura ao vivo (segundos)
-input double          InpProtFator        = 3.0;        // Volume da janela >= fator x volume normal
-input double          InpProtDominioPct   = 75;         // % do volume agredido de um lado
-input int             InpProtNiveis       = 3;          // Níveis (ticks) que o preço andou contra
-input bool            InpProtCancelar     = true;       // Cancelar a ordem limitada pendente
-input bool            InpProtZerar        = true;       // Zerar a posição aberta
-input bool            InpProtSoNoPrejuizo = false;      // Zerar só se a posição estiver perdendo
-input int             InpProtPausaSeg     = 120;        // Segundos sem nova entrada depois de proteger
-input bool            InpProtSoAvisar     = false;      // TESTE: só escreve no log, não cancela nem zera
-
 //--- estado
 CTrade   trade;
 datetime g_ultimaBarra = 0;
 ulong    g_ordem       = 0;
 int      g_ordemBarras = 0;
 bool     g_avisoFlags  = false;
-datetime g_protegidoAte = 0;   // sem entrada nova antes dessa hora
-datetime g_protUltSeg   = 0;   // protecao lida no maximo 1x por segundo
-int      g_protAvisos   = 0;   // quantas vezes a protecao disparou hoje
-datetime g_protDia      = 0;   // dia dos contadores
 int      g_hMA          = INVALID_HANDLE;
-int      g_hMC          = INVALID_HANDLE;   // média que cancela a limitada
 int      g_hAD          = INVALID_HANDLE;   // Accumulation/Distribution
 ENUM_TIMEFRAMES g_adTF  = PERIOD_CURRENT;
 int      g_adSinal      = 0;                // +1 positivo, -1 negativo
 double   g_adValor      = 0;
-ENUM_TIMEFRAMES g_mcTF  = PERIOD_CURRENT;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -157,19 +127,6 @@ int OnInit()
          return(INIT_FAILED);
         }
      }
-   if(InpCancelaMedia)
-     {
-      g_mcTF = (InpMCTF == PERIOD_CURRENT) ? InpTF : InpMCTF;
-      if(InpMCTipo == MEDIA_ADAPTATIVA)
-         g_hMC = iAMA(_Symbol, g_mcTF, InpMCAMAPeriodo, InpMCAMARapida, InpMCAMALenta, 0, InpMCPreco);
-      else
-         g_hMC = iMA(_Symbol, g_mcTF, InpMCPeriodo, 0, InpMCMetodo, PRICE_CLOSE);
-      if(g_hMC == INVALID_HANDLE)
-        {
-         Print("Falha ao criar a média que cancela a limitada.");
-         return(INIT_FAILED);
-        }
-     }
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(50);
@@ -181,8 +138,6 @@ void OnDeinit(const int reason)
   {
    if(g_hMA != INVALID_HANDLE)
       IndicatorRelease(g_hMA);
-   if(g_hMC != INVALID_HANDLE)
-      IndicatorRelease(g_hMC);
    if(g_hAD != INVALID_HANDLE)
       IndicatorRelease(g_hAD);
   }
@@ -450,178 +405,8 @@ int Agressao(const MqlRates &barra, double volNormalBarra, double &inicio)
 //+------------------------------------------------------------------+
 //| Entrada: limitada X pontos melhor que o fechamento da barra       |
 //+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| Proteção: agressão ao vivo contra a mão do robô                   |
-//+------------------------------------------------------------------+
-//--- agressão dos últimos InpProtJanelaSeg segundos: +1, -1 ou 0
-int AgressaoAgora(double &fator)
-  {
-   fator = 0;
-   MqlRates r[];
-   ArraySetAsSeries(r, true);
-   if(CopyRates(_Symbol, InpTF, 1, InpMediaN, r) < InpMediaN)
-      return 0;
-   double soma = 0;
-   for(int k = 0; k < InpMediaN; k++)
-      soma += Vol(r[k]);
-   double volNormalBarra = soma / InpMediaN;
-   if(volNormalBarra <= 0)
-      return 0;
-   double volJanela = volNormalBarra * InpProtJanelaSeg / (double)PeriodSeconds(InpTF);
-   if(volJanela <= 0)
-      return 0;
-
-   MqlTick tk[];
-   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
-   ulong de  = ate - (ulong)InpProtJanelaSeg * 1000;
-   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
-   if(n < 2)
-      return 0;
-
-   bool temFlags = false;
-   for(int i = 0; i < n && !temFlags; i++)
-      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0)
-         temFlags = true;
-
-   double vc = 0, vv = 0;
-   double p0 = tk[0].last, mx = p0, mn = p0;
-   int    ultimo = 0;
-   for(int i = 0; i < n; i++)
-     {
-      int l = 0;
-      if(temFlags)
-        {
-         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
-         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
-         l = (b && !v) ? +1 : (v && !b) ? -1 : 0;
-        }
-      else
-         if(i > 0)
-           {
-            l = (tk[i].last > tk[i-1].last) ? +1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
-            ultimo = l;
-           }
-      double vol = VolTick(tk[i]);
-      if(l > 0)
-         vc += vol;
-      if(l < 0)
-         vv += vol;
-      if(tk[i].last > 0)
-        {
-         mx = MathMax(mx, tk[i].last);
-         mn = MathMin(mn, tk[i].last);
-        }
-     }
-
-   double total = vc + vv;
-   fator = total / volJanela;
-   if(total <= 0 || total < InpProtFator * volJanela)
-      return 0;
-
-   double niveis = InpProtNiveis * Tick();
-   if(vc >= InpProtDominioPct / 100.0 * total && mx - p0 >= niveis - Tick() / 2)
-      return +1;
-   if(vv >= InpProtDominioPct / 100.0 * total && p0 - mn >= niveis - Tick() / 2)
-      return -1;
-   return 0;
-  }
-
-void ProtecaoAgressao()
-  {
-   if(!InpProtecao)
-      return;
-
-   //--- direção da posição e da ordem pendente
-   ulong t[];
-   int nPos = ListarPosicoes(t);
-   int posDir = 0;
-   if(nPos > 0 && PositionSelectByTicket(t[0]))
-      posDir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? +1 : -1;
-   int ordDir = 0;
-   if(TemOrdem())
-     {
-      ENUM_ORDER_TYPE tp = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-      ordDir = (tp == ORDER_TYPE_BUY_LIMIT || tp == ORDER_TYPE_BUY) ? +1 : -1;
-     }
-   if(posDir == 0 && ordDir == 0)
-      return;
-
-   datetime agora = TimeCurrent();
-   if(agora == g_protUltSeg)
-      return;
-   g_protUltSeg = agora;
-
-   double fator = 0;
-   int ag = AgressaoAgora(fator);
-   if(ag == 0)
-      return;
-
-   if(InicioDoDia(agora) != g_protDia)
-     {
-      g_protDia = InicioDoDia(agora);
-      g_protAvisos = 0;
-     }
-
-   //--- posição com a agressão vindo contra
-   if(posDir != 0 && ag == -posDir && InpProtZerar)
-     {
-      double pts = 0;
-      if(PositionSelectByTicket(t[0]))
-        {
-         double ab = PositionGetDouble(POSITION_PRICE_OPEN);
-         double at = PositionGetDouble(POSITION_PRICE_CURRENT);
-         if(ab > 0 && at > 0)
-            pts = posDir * (at - ab) / _Point;
-        }
-      if(!(InpProtSoNoPrejuizo && pts > 0))
-        {
-         g_protAvisos++;
-         if(InpProtSoAvisar)
-           {
-            PrintFormat("PROTEÇÃO (SÓ AVISO %d): agressão %s de %.1fx contra a posição %s - ZERARIA em %.0f pontos",
-                        g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
-                        (posDir > 0 ? "comprada" : "vendida"), pts);
-            return;
-           }
-         Zerar();
-         g_protegidoAte = agora + InpProtPausaSeg;
-         PrintFormat("PROTEÇÃO %d: agressão %s de %.1fx o volume contra a posição %s - zerado em %.0f pontos",
-                     g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
-                     (posDir > 0 ? "comprada" : "vendida"), pts);
-         return;
-        }
-     }
-
-   //--- ordem limitada que ia ser executada contra o fluxo
-   if(ordDir != 0 && ag == -ordDir && InpProtCancelar)
-     {
-      g_protAvisos++;
-      if(InpProtSoAvisar)
-        {
-         PrintFormat("PROTEÇÃO (SÓ AVISO %d): agressão %s de %.1fx contra a limitada %s - CANCELARIA a ordem",
-                     g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
-                     (ordDir > 0 ? "de compra" : "de venda"));
-         return;
-        }
-      CancelarOrdem();
-      g_ordemBarras = 0;
-      g_protegidoAte = agora + InpProtPausaSeg;
-      PrintFormat("PROTEÇÃO %d: agressão %s de %.1fx o volume contra a limitada %s - ordem cancelada",
-                  g_protAvisos, (ag > 0 ? "de compra" : "de venda"), fator,
-                  (ordDir > 0 ? "de compra" : "de venda"));
-     }
-  }
-
-//+------------------------------------------------------------------+
 void Entrar(int dir, double fechamento, double inicio)
   {
-   //--- acabou de proteger: fica de fora pelo tempo da pausa
-   if(InpProtecao && InpProtPausaSeg > 0 && TimeCurrent() < g_protegidoAte)
-     {
-      PrintFormat("Entrada ignorada: protegido por mais %d s", (int)(g_protegidoAte - TimeCurrent()));
-      return;
-     }
-
    //--- A/D contra o lado da entrada: não manda
    if(InpUsarAD && g_adSinal != 0 && dir != g_adSinal)
      {
@@ -629,25 +414,6 @@ void Entrar(int dir, double fechamento, double inicio)
                   (dir > 0 ? "compra" : "venda"),
                   (g_adSinal > 0 ? "positivo" : "negativo"), g_adValor);
       return;
-     }
-
-   //--- candle fechado do lado contrário: não manda a limitada
-   if(InpCancelaMedia && g_hMC != INVALID_HANDLE)
-     {
-      double ma[];
-      ArraySetAsSeries(ma, true);
-      double c1 = iClose(_Symbol, g_mcTF, 1);
-      if(CopyBuffer(g_hMC, 0, 1, 1, ma) >= 1 && ma[0] > 0 && c1 > 0)
-        {
-         double folga = Pts(InpMCFolga);
-         if((dir < 0 && c1 > ma[0] + folga) || (dir > 0 && c1 < ma[0] - folga))
-           {
-            PrintFormat("Limitada de %s não enviada: candle fechou em %.0f, %s média (%.0f)",
-                        (dir > 0 ? "compra" : "venda"), c1,
-                        (dir < 0 ? "acima da" : "abaixo da"), ma[0]);
-            return;
-           }
-        }
      }
 
    double entrada = Arred(fechamento - dir * Pts(InpOffsetLimite));
@@ -768,44 +534,10 @@ void AtualizarAD()
      }
   }
 
-//--- candle fechou do lado contrário da limitada pendente: cancela
-bool CancelarContraMedia()
-  {
-   if(!InpCancelaMedia || g_hMC == INVALID_HANDLE || !TemOrdem())
-      return false;
-   ENUM_ORDER_TYPE tp = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-   int dir = (tp == ORDER_TYPE_BUY_LIMIT || tp == ORDER_TYPE_BUY) ? +1 : -1;
-
-   double ma[];
-   ArraySetAsSeries(ma, true);
-   if(CopyBuffer(g_hMC, 0, 1, 1, ma) < 1 || ma[0] <= 0)
-      return false;
-   double c1 = iClose(_Symbol, g_mcTF, 1);
-   if(c1 <= 0)
-      return false;
-
-   double folga = Pts(InpMCFolga);
-   bool contra = (dir < 0 && c1 > ma[0] + folga) ||
-                 (dir > 0 && c1 < ma[0] - folga);
-   if(!contra)
-      return false;
-
-   CancelarOrdem();
-   g_ordemBarras = 0;
-   PrintFormat("Limitada de %s cancelada: candle fechou em %.0f, %s a média (%.0f)",
-               (dir > 0 ? "compra" : "venda"), c1,
-               (dir < 0 ? "acima da" : "abaixo da"), ma[0]);
-   return true;
-  }
-
 //+------------------------------------------------------------------+
 void NovaBarra()
   {
    AtualizarAD();
-
-   // candle contra a média cancela a limitada antes de contar a validade
-   if(CancelarContraMedia())
-      return;
 
    // validade da ordem limitada
    if(TemOrdem())
@@ -875,7 +607,6 @@ void OnTick()
       return;
      }
 
-   ProtecaoAgressao();
    GerirTrailing();
 
    datetime barra = iTime(_Symbol, InpTF, 0);

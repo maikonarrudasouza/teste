@@ -1,6 +1,6 @@
 # Filtro A/D (Accumulation/Distribution)
 
-Consenso_WIN v1.11 e Agressao_WIN v1.06.
+Consenso_WIN v1.12 e Agressao_WIN v1.07.
 
 ## A regra
 Lido no fechamento de cada barra:
@@ -34,8 +34,10 @@ primeira barra do dia. Positivo quer dizer que entrou mais compra do que venda
 **hoje**, independente de onde o histórico começa. Se você vir o filtro trocando de
 lado sem motivo depois de recarregar o gráfico, é esse modo que resolve.
 
-## O que foi desligado
-- `M_Usar` / `InpCancelaMedia` (cancelar pela média adaptativa): **false**.
-- `P_Usar` / `InpProtecao` (proteção por rajada de agressão): **false**.
+## O que foi retirado
+A regra de cancelar pela média adaptativa e a proteção por rajada de agressão
+foram removidas do código dos dois robôs. Se um dia quiser alguma delas de volta,
+está no histórico do repositório (commits `32c2e0c` e `e327199`).
 
-O código das duas continua no arquivo, parado. É só ligar se quiser comparar.
+O filtro de tendência por média (`InpUsarFiltroTend` no Agressão, `D_FiltroTend` e
+`F_FiltroTend` no Consenso) continua existindo: é outra coisa, e não foi mexido.
