@@ -31,6 +31,18 @@
 //|          * Reverter nasce desligado: em conta netting, com varios |
 //|            graficos Kagi, ReversePosition inverte a posicao       |
 //|            liquida inteira, inclusive a parte dos outros.         |
+//|  v1.05 - ModoLimite. No modo 1 (preco atual + offset) a ordem     |
+//|          nascia a poucos pontos do preco e era preenchida quase   |
+//|          como uma ordem a mercado, porque o recuo disponivel no   |
+//|          fechamento da perna e o proprio tamanho da caixa do      |
+//|          Kagi. Agora o padrao e o modo 2: a limitada vai no       |
+//|          EXTREMO da perna do sinal (maxima na venda, minima na    |
+//|          compra), que e o melhor preco que ainda cabe dentro da   |
+//|          premissa. O modo 3 coloca a ordem ALEM do extremo, para  |
+//|          quem quer esperar um preco melhor ainda. Em qualquer     |
+//|          modo a ordem e descartada se cair do lado errado do      |
+//|          preco atual, que e o que a transformava em ordem a       |
+//|          mercado.                                                 |
 //+------------------------------------------------------------------+
 input
   // --- Barra que da o sinal ---
@@ -45,9 +57,11 @@ input
   AcumMinimo(500);     // Saldo minimo em contratos para valer compra/venda
 
   // --- Entrada por limite ---
-  OffsetLimite(100);   // Pontos melhor que o preco atual (teto desejado)
-  FracRecuo(0.50);     // Usa no maximo esta fracao do recuo ja feito
-  MinOffset(10);       // Offset minimo: abaixo disso nao manda ordem
+  ModoLimite(2);       // 1 = preco atual + offset | 2 = extremo da perna | 3 = extremo + OffsetExtremo
+  OffsetExtremo(0);    // [modo 3] pontos ALEM do extremo da perna
+  OffsetLimite(100);   // [modo 1] pontos melhor que o preco atual (teto)
+  FracRecuo(0.50);     // [modo 1] usa no maximo esta fracao do recuo
+  MinOffset(50);       // [modo 1] offset minimo: abaixo disso nao manda
   ValidadeBarras(2);   // Barras em que o sinal continua valendo
 
   // --- Ordem ---
@@ -124,28 +138,59 @@ begin
 
   //================================================================
   //  PRECO DA LIMITADA
-  //  Venda: entre o preco atual e a MAXIMA da perna do sinal.
-  //  Compra: entre o preco atual e a MINIMA da perna do sinal.
-  //  O offset nunca passa de FracRecuo x recuo ja feito, por isso a
-  //  ordem e sempre alcancavel, em Kagi grande ou pequeno.
+  //  Modo 2 (padrao): no proprio extremo da perna do sinal.
+  //  Modo 3: alem do extremo, para esperar um preco melhor.
+  //  Modo 1: preco atual + offset, com teto de FracRecuo x recuo.
+  //  Em todos os modos, se a ordem cair do lado errado do preco
+  //  atual ela e descartada, em vez de virar ordem a mercado.
   //================================================================
   preco := 0;
 
   if dir = -1 then
   begin
     extremo := High[idx];
-    recuo   := extremo - Close;
-    off     := OffsetLimite;
-    if off > recuo * FracRecuo then off := recuo * FracRecuo;
-    if off >= MinOffset then preco := Round((Close + off) / 5) * 5;
+
+    if ModoLimite = 2 then
+      preco := extremo
+    else if ModoLimite = 3 then
+      preco := extremo + OffsetExtremo
+    else
+    begin
+      recuo := extremo - Close;
+      off   := OffsetLimite;
+      if off > recuo * FracRecuo then off := recuo * FracRecuo;
+      if off >= MinOffset then preco := Close + off;
+    end;
+
+    if preco > 0 then
+    begin
+      preco := Round(preco / 5) * 5;
+      //--- venda limitada tem que ficar ACIMA do preco atual
+      if preco <= Close then preco := 0;
+    end;
   end
   else if dir = 1 then
   begin
     extremo := Low[idx];
-    recuo   := Close - extremo;
-    off     := OffsetLimite;
-    if off > recuo * FracRecuo then off := recuo * FracRecuo;
-    if off >= MinOffset then preco := Round((Close - off) / 5) * 5;
+
+    if ModoLimite = 2 then
+      preco := extremo
+    else if ModoLimite = 3 then
+      preco := extremo - OffsetExtremo
+    else
+    begin
+      recuo := Close - extremo;
+      off   := OffsetLimite;
+      if off > recuo * FracRecuo then off := recuo * FracRecuo;
+      if off >= MinOffset then preco := Close - off;
+    end;
+
+    if preco > 0 then
+    begin
+      preco := Round(preco / 5) * 5;
+      //--- compra limitada tem que ficar ABAIXO do preco atual
+      if preco >= Close then preco := 0;
+    end;
   end;
 
   horarioOk := (Time >= HoraInicio) and (Time < HoraFimEntradas);
