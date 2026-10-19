@@ -1,0 +1,193 @@
+//+------------------------------------------------------------------+
+//|  KagiFita_WIN  -  Estrategia de execucao NTSL (Profit)            |
+//|                                                                   |
+//|  CORRECAO A FAVOR DA FITA, pelo CANDLE do proprio grafico         |
+//|   - VENDA : barra de ALTA (fechamento > abertura) com amplitude   |
+//|             (maxima - minima) >= Amplitude e fita VENDEDORA.      |
+//|   - COMPRA: barra de BAIXA (fechamento < abertura) com amplitude  |
+//|             >= Amplitude e fita COMPRADORA.                       |
+//|                                                                   |
+//|  v1.00 - primeira versao                                          |
+//|  v1.01 - gatilho pela perna do Kagi e fita acumulada              |
+//|  v1.02 - acumulado igual ao do MQL5 (variacao em 10 minutos)      |
+//|  v1.03 - gatilho pelo candle do grafico: cor contra a fita e      |
+//|          amplitude minima. Fita pela variacao do saldo de         |
+//|          agressao nos ultimos AcumJanela minutos (PowerMeter).    |
+//|  v1.04 - ENTRADA POR LIMITE adaptada ao Kagi:                     |
+//|          * BarraSinal escolhe em que barra o sinal e lido         |
+//|            (0 = ultima fechada, 1 = penultima). No Kagi a perna   |
+//|            so fecha quando o preco reverte, por isso a leitura    |
+//|            na penultima costuma pegar a perna inteira.            |
+//|          * O offset da limitada e limitado pelo RECUO que o preco |
+//|            ja fez desde o extremo da perna do sinal. Assim a      |
+//|            ordem fica SEMPRE entre o preco atual e o extremo, e   |
+//|            vale para qualquer tamanho de Kagi, inclusive os       |
+//|            pequenos, em que 100 pontos seriam inalcancaveis.      |
+//|          * O sinal continua valido por ValidadeBarras barras, e   |
+//|            a limitada e reenviada em cada avaliacao (em NTSL a    |
+//|            ordem vive um candle se nao for reenviada).            |
+//|          * Stop e alvo sao reenviados SEMPRE que ha posicao,      |
+//|            inclusive na barra em que aparece sinal contrario.     |
+//|          * Reverter nasce desligado: em conta netting, com varios |
+//|            graficos Kagi, ReversePosition inverte a posicao       |
+//|            liquida inteira, inclusive a parte dos outros.         |
+//+------------------------------------------------------------------+
+input
+  // --- Barra que da o sinal ---
+  BarraSinal(1);       // 0 = ultima fechada | 1 = penultima (Kagi)
+
+  // --- Candle (perna do Kagi) ---
+  Amplitude(200);      // Maxima - minima minima da barra do sinal (pontos)
+
+  // --- Fita: acumulado (igual ao Consenso_WIN do MQL5) ---
+  UsarFita(true);      // false = entra so pelo candle
+  AcumJanela(10);      // Saldo de agressao dos ultimos X minutos
+  AcumMinimo(500);     // Saldo minimo em contratos para valer compra/venda
+
+  // --- Entrada por limite ---
+  OffsetLimite(100);   // Pontos melhor que o preco atual (teto desejado)
+  FracRecuo(0.50);     // Usa no maximo esta fracao do recuo ja feito
+  MinOffset(10);       // Offset minimo: abaixo disso nao manda ordem
+  ValidadeBarras(2);   // Barras em que o sinal continua valendo
+
+  // --- Ordem ---
+  StopPts(120);        // Stop (pontos)
+  AlvoPts(120);        // Alvo (pontos)
+  SlipStop(20);        // Limite da ordem stop alem do gatilho (pontos)
+  Reverter(false);     // Sinal contrario com posicao aberta: vira a mao
+
+  // --- Horario (HHMM) ---
+  HoraInicio(915);
+  HoraFimEntradas(1715);
+  HoraZerar(1750);
+
+var
+  i          : Integer;
+  ampI       : Float;
+  variacao   : Float;    // saldo de agressao na janela
+  fitaCompra : Boolean;
+  fitaVenda  : Boolean;
+  dir        : Integer;  // -1 venda | +1 compra | 0 nada
+  idx        : Integer;  // barra em que o sinal foi encontrado
+  extremo    : Float;    // maxima (venda) ou minima (compra) da perna
+  recuo      : Float;    // quanto o preco ja voltou do extremo
+  off        : Float;    // offset efetivamente usado
+  preco      : Float;    // preco da limitada (0 = nao manda)
+  horarioOk  : Boolean;
+
+begin
+  //================================================================
+  //  FITA: acumulado (mesma regra do Consenso_WIN no MQL5)
+  //  Saldo = contratos agredidos na compra - na venda nos ultimos
+  //  AcumJanela minutos.
+  //================================================================
+  variacao := PowerMeter(osBuy, AcumJanela) - PowerMeter(osSell, AcumJanela);
+
+  if UsarFita then
+  begin
+    fitaCompra := variacao >=  AcumMinimo;
+    fitaVenda  := variacao <= -AcumMinimo;
+  end
+  else
+  begin
+    fitaCompra := true;
+    fitaVenda  := true;
+  end;
+
+  //================================================================
+  //  SINAL: procura a perna qualificada a partir de BarraSinal,
+  //  olhando ValidadeBarras barras para tras. A mais recente ganha.
+  //================================================================
+  dir := 0;
+  idx := 0;
+
+  for i := BarraSinal to BarraSinal + ValidadeBarras - 1 do
+  begin
+    if dir = 0 then
+    begin
+      ampI := High[i] - Low[i];
+      if ampI >= Amplitude then
+      begin
+        if (Close[i] > Open[i]) and fitaVenda then
+        begin
+          dir := -1;
+          idx := i;
+        end
+        else if (Close[i] < Open[i]) and fitaCompra then
+        begin
+          dir := 1;
+          idx := i;
+        end;
+      end;
+    end;
+  end;
+
+  //================================================================
+  //  PRECO DA LIMITADA
+  //  Venda: entre o preco atual e a MAXIMA da perna do sinal.
+  //  Compra: entre o preco atual e a MINIMA da perna do sinal.
+  //  O offset nunca passa de FracRecuo x recuo ja feito, por isso a
+  //  ordem e sempre alcancavel, em Kagi grande ou pequeno.
+  //================================================================
+  preco := 0;
+
+  if dir = -1 then
+  begin
+    extremo := High[idx];
+    recuo   := extremo - Close;
+    off     := OffsetLimite;
+    if off > recuo * FracRecuo then off := recuo * FracRecuo;
+    if off >= MinOffset then preco := Round((Close + off) / 5) * 5;
+  end
+  else if dir = 1 then
+  begin
+    extremo := Low[idx];
+    recuo   := Close - extremo;
+    off     := OffsetLimite;
+    if off > recuo * FracRecuo then off := recuo * FracRecuo;
+    if off >= MinOffset then preco := Round((Close - off) / 5) * 5;
+  end;
+
+  horarioOk := (Time >= HoraInicio) and (Time < HoraFimEntradas);
+
+  if dir = -1 then PaintBar(clRed)
+  else if dir = 1 then PaintBar(clLime);
+
+  //================================================================
+  //  ORDENS
+  //================================================================
+  if HasPosition then
+  begin
+    //--- protecao reenviada SEMPRE que existe posicao
+    if IsBought then
+    begin
+      SellToCoverLimit(BuyPrice + AlvoPts);
+      SellToCoverStop(BuyPrice - StopPts, BuyPrice - StopPts - SlipStop);
+    end
+    else
+    begin
+      BuyToCoverLimit(SellPrice - AlvoPts);
+      BuyToCoverStop(SellPrice + StopPts, SellPrice + StopPts + SlipStop);
+    end;
+
+    if Time >= HoraZerar then
+      ClosePosition
+    else if Reverter and horarioOk then
+    begin
+      if IsBought and (dir = -1) then
+        ReversePosition
+      else if IsSold and (dir = 1) then
+        ReversePosition;
+    end;
+  end
+  else
+  begin
+    if horarioOk and (preco > 0) then
+    begin
+      if dir = -1 then
+        SellShortLimit(preco)
+      else if dir = 1 then
+        BuyLimit(preco);
+    end;
+  end;
+end;
