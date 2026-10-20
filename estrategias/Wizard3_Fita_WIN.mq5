@@ -24,7 +24,8 @@
 //|                                                                  |
 //|  ENTRADA                                                         |
 //|    Modo 1 (padrao): limitada OffsetLimite pontos melhor que o    |
-//|    preco, valida por ValidadeSeg segundos.                       |
+//|    preco, valida por ValidadeBarras barras do grafico, como nos  |
+//|    outros robos.                                                 |
 //|    Modo 0: a mercado, no momento da agressao.                    |
 //|                                                                  |
 //|  PROTECAO                                                        |
@@ -34,6 +35,16 @@
 //|    posicao aberta.                                               |
 //|                                                                  |
 //|  Conta netting (B3): uma posicao por simbolo.                    |
+//|                                                                  |
+//|  PERFIL DOS NUMEROS                                              |
+//|    O gatilho nasce um pouco agressivo: fator 2.0, dominio 70% e  |
+//|    10 ticks de deslocamento. Para apertar, suba o fator e os      |
+//|    niveis. O cancelamento por agressao contra fica em 15 ticks,   |
+//|    de proposito mais exigente que a entrada, para nao desistir    |
+//|    da ordem no primeiro repique.                                 |
+//|    A forca minima do contexto fica em 50: abaixo disso um         |
+//|    indicador sozinho passaria a abrir ordem, e ai o consenso      |
+//|    dos tres deixa de existir.                                     |
 //|                                                                  |
 //|  v1.00 - primeira versao                                         |
 //+------------------------------------------------------------------+
@@ -67,15 +78,15 @@ input double InpStochPiso      = 20;        // Stoch: abaixo disso nao vota vend
 
 input group "Gatilho: agressao na fita"
 input int    InpAgrJanelaSeg   = 10;        // Janela de leitura (segundos)
-input double InpAgrFator       = 3.0;       // Volume da janela >= fator x volume normal
-input double InpAgrDominioPct  = 75;        // % do volume agredido de um lado
-input int    InpAgrNiveis      = 15;        // Niveis (ticks) que o preco andou a favor
+input double InpAgrFator       = 2.0;       // Volume da janela >= fator x volume normal
+input double InpAgrDominioPct  = 70;        // % do volume agredido de um lado
+input int    InpAgrNiveis      = 10;        // Niveis (ticks) que o preco andou a favor
 input int    InpAgrMediaN      = 30;        // Barras M1 para medir o volume normal
 
 input group "Entrada"
 input int    InpModoEntrada    = 1;         // 0 = a mercado | 1 = limitada
 input int    InpOffsetLimite   = 100;       // [modo 1] pontos melhor que o preco
-input int    InpValidadeSeg    = 60;        // [modo 1] validade da limitada (segundos)
+input int    InpValidadeBarras = 3;         // [modo 1] validade da limitada (barras)
 
 input group "Stop e alvo"
 input int    InpStopPoints     = 125;       // Stop (pontos)
@@ -468,19 +479,28 @@ bool EnviarEntrada(const int dir)
   }
 
 //+------------------------------------------------------------------+
-//| Cancela a limitada vencida pelo tempo                            |
+//| Cancela a limitada vencida pelas barras de validade              |
 //+------------------------------------------------------------------+
 void CancelarVencida()
   {
-   if(InpModoEntrada == 0 || InpValidadeSeg <= 0)
+   if(InpModoEntrada == 0 || InpValidadeBarras <= 0)
       return;
    ulong ticket;
    int   dir;
    if(!Pendente(ticket, dir))
       return;
+
    datetime posta = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
-   if(posta > 0 && (TimeCurrent() - posta) >= InpValidadeSeg)
-      trade.OrderDelete(ticket);
+   if(posta <= 0)
+      return;
+
+   //--- quantas barras do grafico se passaram desde o envio
+   int barras = iBarShift(_Symbol, InpTF, posta, false);
+   if(barras >= InpValidadeBarras)
+     {
+      if(trade.OrderDelete(ticket))
+         PrintFormat("Limitada cancelada: venceram as %d barras de validade", InpValidadeBarras);
+     }
   }
 
 //+------------------------------------------------------------------+
