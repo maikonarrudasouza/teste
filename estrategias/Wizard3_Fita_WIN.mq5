@@ -30,8 +30,10 @@
 //|      ancora + OffsetLimite  numa VENDA                            |
 //|    e a ancora vem de AncoraLimite:                                |
 //|      0 = preco atual                                              |
-//|      1 = INICIO DA AGRESSAO, o primeiro negocio da janela, que e  |
-//|          o padrao                                                 |
+//|      1 = INICIO DA AGRESSAO, achado pela varredura em fatias de   |
+//|          InpFatiaMs de tras para frente, que e o padrao. Nao e o  |
+//|          primeiro negocio da janela, e o ponto onde o fluxo       |
+//|          realmente comecou                                        |
 //|      2 = base do movimento, o menor preco negociado na janela     |
 //|          numa compra e o maior numa venda                         |
 //|    AncoraMinPts descarta a ordem que nascer perto demais do       |
@@ -91,11 +93,14 @@ input double InpAgrFator       = 2.0;       // Volume da janela >= fator x volum
 input double InpAgrDominioPct  = 70;        // % do volume agredido de um lado
 input int    InpAgrNiveis      = 10;        // Niveis (ticks) que o preco andou a favor
 input int    InpAgrMediaN      = 30;        // Barras M1 para medir o volume normal
+input long   InpLoteTeto       = 1000;      // Negocio acima disso e leilao/cruzada: descartado (0 = sem teto)
 
 input group "Entrada"
 input int    InpModoEntrada    = 1;         // 0 = a mercado | 1 = limitada
 input int    InpAncoraLimite   = 1;         // 0 = preco atual | 1 = inicio da agressao | 2 = base do movimento
 input int    InpOffsetLimite   = 250;       // Pontos a partir da ancora (compra abaixo, venda acima)
+input int    InpFatiaMs        = 1000;      // [ancora 1] tamanho da fatia da varredura (ms)
+input double InpTolRajada      = 0.30;      // [ancora 1] quanto uma fatia pode remar contra (0.30 = 30%)
 input int    InpAncoraMinPts   = 25;        // Distancia minima do preco atual (abaixo disso nao manda)
 input int    InpValidadeBarras = 3;         // [modo 1] validade da limitada (barras)
 
@@ -314,6 +319,54 @@ int Contexto()
   }
 
 //+------------------------------------------------------------------+
+//| CLASSIFICACAO DO AGRESSOR                                        |
+//|                                                                  |
+//| Ponto unico onde se decide de que lado foi a agressao, igual ao   |
+//| Fita_WIN, para que os dois robos nunca leiam a fita de formas     |
+//| diferentes. Ordem de decisao:                                     |
+//|   1. flag BUY ou SELL do feed, que e a informacao da bolsa       |
+//|   2. preco negociado contra o book do proprio tick               |
+//|      (bateu no ask = comprador agrediu; no bid = vendedor)       |
+//|   3. uptick ou downtick contra o negocio anterior                |
+//|                                                                  |
+//| Devolve +1 compra, -1 venda, 0 realmente indefinido. O volume do  |
+//| indefinido nao se perde: conta no total e so nao entra no delta,  |
+//| porque inventar um lado seria pior que admitir que nao da para    |
+//| saber.                                                            |
+//+------------------------------------------------------------------+
+int LadoAgressor(const MqlTick &t, double &ultPreco)
+  {
+   bool compra = ((t.flags & TICK_FLAG_BUY)  != 0);
+   bool venda  = ((t.flags & TICK_FLAG_SELL) != 0);
+
+   int lado = 0;
+
+   if(compra != venda)
+      lado = compra ? 1 : -1;
+   else
+      if(t.last > 0.0)
+        {
+         //--- sem flag util: compara com o book daquele instante
+         if(t.ask > 0.0 && t.last >= t.ask)
+            lado = 1;
+         else
+            if(t.bid > 0.0 && t.last <= t.bid)
+               lado = -1;
+            else
+               //--- book indisponivel: regra do uptick
+               if(ultPreco > 0.0 && t.last > ultPreco)
+                  lado = 1;
+               else
+                  if(ultPreco > 0.0 && t.last < ultPreco)
+                     lado = -1;
+        }
+
+   if(t.last > 0.0)
+      ultPreco = t.last;
+   return(lado);
+  }
+
+//+------------------------------------------------------------------+
 //| Volume normal esperado na janela                                 |
 //+------------------------------------------------------------------+
 double VolNormalJanela()
@@ -358,7 +411,7 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
    if(n <= 0)
       return(false);
 
-   double volC = 0.0, volV = 0.0;
+   double volC = 0.0, volV = 0.0, volN = 0.0;
    double pIni = 0.0, pMax = 0.0, pMin = 0.0, ultimo = 0.0;
 
    for(int i = 0; i < n; i++)
@@ -371,6 +424,10 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
       if(vol <= 0.0)
          vol = 1.0;
 
+      //--- negocio absurdo: leilao de abertura ou cruzada de balcao
+      if(InpLoteTeto > 0 && vol > (double)InpLoteTeto)
+         continue;
+
       if(pIni == 0.0)
         {
          pIni = p;
@@ -382,30 +439,14 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
       if(p < pMin)
          pMin = p;
 
-      bool compra = ((t[i].flags & TICK_FLAG_BUY)  != 0);
-      bool venda  = ((t[i].flags & TICK_FLAG_SELL) != 0);
-      //--- negocio com as duas flags ou sem nenhuma: regra do tick
-      if(compra == venda)
-        {
-         compra = false;
-         venda  = false;
-         if(ultimo > 0.0)
-           {
-            if(p > ultimo)
-               compra = true;
-            else
-               if(p < ultimo)
-                  venda = true;
-           }
-        }
-
-      if(compra)
+      int lado = LadoAgressor(t[i], ultimo);
+      if(lado > 0)
          volC += vol;
       else
-         if(venda)
+         if(lado < 0)
             volV += vol;
-
-      ultimo = p;
+         else
+            volN += vol;   // volume preservado, sem lado atribuido
      }
 
    if(pIni <= 0.0)
@@ -423,7 +464,9 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
       caiu  = (pIni - pMin) / tk;
      }
 
-   double total = volC + volV;
+   //--- o neutro entra no divisor: se metade da fita veio sem agressor
+   //--- identificavel, nao se pode afirmar que ha dominio de um lado
+   double total = volC + volV + volN;
    if(total <= 0.0)
       return(false);
 
@@ -455,6 +498,86 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
   }
 
 //+------------------------------------------------------------------+
+//| INICIO DA RAJADA                                                 |
+//|                                                                  |
+//| Varre a janela de TRAS PARA FRENTE em fatias de InpFatiaMs e      |
+//| acumula o delta de cada uma. Enquanto a fatia concorda com a      |
+//| direcao do sinal, ou e neutra, ela faz parte da rajada. Na        |
+//| primeira fatia que rema contra com forca, a varredura para: a     |
+//| rajada comecou depois dela.                                       |
+//|                                                                  |
+//| Isso resolve o problema da janela deslizante: o primeiro negocio  |
+//| da janela de 10 segundos e so o preco de 10 segundos atras, que   |
+//| nao e o instante em que o fluxo comecou. Aqui o inicio e achado   |
+//| pelo proprio fluxo.                                               |
+//|                                                                  |
+//| Devolve o preco do primeiro negocio da rajada, ou 0 se nao achar. |
+//+------------------------------------------------------------------+
+double InicioRajada(const int direcao)
+  {
+   if(direcao == 0)
+      return(0.0);
+
+   ulong fimMs = (ulong)TimeCurrent() * 1000 + 999;
+   ulong iniMs = (fimMs > (ulong)InpAgrJanelaSeg * 1000) ? fimMs - (ulong)InpAgrJanelaSeg * 1000 : 0;
+
+   MqlTick ticks[];
+   int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_TRADE, iniMs, fimMs);
+   if(n <= 0)
+      return(0.0);
+
+   int    idx         = n - 1;     // comeca no negocio mais recente
+   double precoRajada = 0.0;
+   int    fatias      = 0;
+
+   while(idx >= 0)
+     {
+      //--- limites da fatia que termina em ticks[idx]
+      ulong fimFatia = ticks[idx].time_msc;
+      ulong iniFatia = (fimFatia > (ulong)InpFatiaMs) ? fimFatia - (ulong)InpFatiaMs : 0;
+
+      double delta = 0.0, vol = 0.0;
+      int    j = idx;
+      while(j >= 0 && ticks[j].time_msc >= iniFatia)
+        {
+         double q = (ticks[j].volume_real > 0.0) ? ticks[j].volume_real : (double)ticks[j].volume;
+         if(q > 0.0 && !(InpLoteTeto > 0 && q > (double)InpLoteTeto))
+           {
+            //--- a varredura e de tras para frente, entao a regra do
+            //--- uptick nao se aplica: usa so a flag e o book
+            double semRef = 0.0;
+            int    lado   = LadoAgressor(ticks[j], semRef);
+            delta += lado * q;
+            vol   += q;          // volume neutro dilui a fatia, nao desaparece
+           }
+         j--;
+        }
+
+      //--- fatia remando contra a direcao: a rajada comeca depois dela
+      if(vol > 0.0)
+        {
+         double saldo = delta / vol;
+         if(saldo * direcao < -InpTolRajada)
+            break;
+        }
+
+      //--- fatia faz parte da rajada: guarda o preco do primeiro negocio dela
+      int primeiro = j + 1;
+      if(primeiro >= 0 && primeiro < n && ticks[primeiro].last > 0.0)
+         precoRajada = ticks[primeiro].last;
+
+      fatias++;
+      idx = j;
+     }
+
+   if(precoRajada > 0.0)
+      PrintFormat("Rajada: %d fatia(s) de %dms | comecou em %s",
+                  fatias, InpFatiaMs, DoubleToString(precoRajada, _Digits));
+
+   return(precoRajada);
+  }
+
+//+------------------------------------------------------------------+
 //| Entrada                                                          |
 //+------------------------------------------------------------------+
 bool EnviarEntrada(const int dir)
@@ -482,7 +605,15 @@ bool EnviarEntrada(const int dir)
    //--- limitada: de onde medir o preco
    double ancora = 0.0;
    if(InpAncoraLimite == 1)
-      ancora = gAgrIni;
+     {
+      //--- acha o inicio real do fluxo varrendo as fatias de tras para frente
+      ancora = InicioRajada(dir);
+      if(ancora <= 0.0)
+        {
+         ancora = gAgrIni;   // reserva: primeiro negocio da janela
+         Print("Nao identifiquei o inicio da rajada - usando o primeiro negocio da janela");
+        }
+     }
    else
       if(InpAncoraLimite == 2)
          ancora = (dir > 0) ? gAgrMin : gAgrMax;
