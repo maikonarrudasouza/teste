@@ -29,6 +29,19 @@
 //|          mesmo simbolo, netting faria um sobrescrever o SL/TP     |
 //|          do outro.                                                |
 //|                                                                   |
+//|  v1.21 - a regra de cancelamento passa a usar LerFita, a mesma     |
+//|          leitura dos tres sinais, em vez de uma classificacao      |
+//|          propria que ignorava o LadoAgressor, o teto de lote e o   |
+//|          volume neutro. O volume de referencia agora exige volume  |
+//|          real: sem ele a regra nao opina, para nao comparar        |
+//|          contratos com numero de negocios. Limiares do             |
+//|          cancelamento ficam mais exigentes que os da entrada       |
+//|          (2.5x e 80%) e o deslocamento vira opcional, porque com a |
+//|          limitada a 250 pontos da ancora o preco executa a ordem   |
+//|          antes de conseguir deslocar. Validade da ordem passa a    |
+//|          ser em BARRAS do grafico. Entrada ancorada no inicio da   |
+//|          rajada, offset 250, stop 120 e alvo 75.                   |
+//|                                                                    |
 //|  v1.20 - offset da limite padrao = 150 pontos.                    |
 //|          MODO CAUTELOSO: quando o preco vai e volta (N reversoes  |
 //|          de pelo menos X pontos na janela), o robo passa a exigir |
@@ -36,7 +49,7 @@
 //|          entrada. Fica ligado no minimo InpChopHoldMin minutos.   |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.20"
+#property version   "1.21"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -103,14 +116,14 @@ enum EAncoraLimite
 
 //--- Ordem
 input bool          InpUsarLimite   = true;   // Entrar por limite (false = a mercado)
-input EAncoraLimite InpAncora       = ANCORA_PRECO_ATUAL; // De onde medir o offset
-input int    InpLimitOffset      = 150;    // [limite] distancia da ancora (pontos)
+input EAncoraLimite InpAncora       = ANCORA_INICIO_AGRESSAO; // De onde medir o offset
+input int    InpLimitOffset      = 250;    // [limite] distancia da ancora (pontos)
 input int    InpFatiaMs          = 1000;   // [ancora rajada] tamanho da fatia de analise (ms)
 input double InpTolRajada        = 0.30;   // [ancora rajada] quanto uma fatia pode remar contra (0.30 = 30%)
-input int    InpOrderValidSeg    = 60;     // [limite] validade da ordem, em segundos
+input int    InpOrderValidBarras = 3;      // [limite] validade da ordem, em barras do grafico
 input double InpLots             = 1.0;    // Contratos por operacao
-input int    InpStopPoints       = 125;    // Stop em pontos
-input int    InpTakePoints       = 1000;   // Alvo em pontos (teto; a saida normal e o trailing)
+input int    InpStopPoints       = 120;    // Stop em pontos
+input int    InpTakePoints       = 75;     // Alvo em pontos
 
 //--- Trailing por DEGRAU (roda a cada tick, fora do acelerador de 1s).
 //--- Desligue InpUsarTrailing para operar so com o take fixo.
@@ -164,9 +177,9 @@ input bool   InpLog              = true;   // Registrar sinais no log
 input group "Cancelar a limite por agressao contra"
 input bool   InpRajUsar       = true;   // Ligar a regra
 input int    InpRajJanelaSeg  = 10;     // Janela de leitura (segundos)
-input double InpRajFator      = 3.0;    // Volume da janela >= fator x volume normal
-input double InpRajDominioPct = 75;     // % do volume agredido de um lado
-input int    InpRajNiveis     = 22;     // Niveis (ticks) que o preco andou contra (22 x 5 = 110 pts)
+input double InpRajFator      = 2.5;    // Volume da janela >= fator x volume normal
+input double InpRajDominioPct = 80;     // % do volume agredido do lado contrario a ordem
+input int    InpRajNiveis     = 0;      // Niveis (ticks) contra a ordem (0 = ignora o deslocamento)
 input int    InpRajMediaN     = 30;     // Barras M1 para medir o volume normal
 
 //--- estado da regra de cancelamento por agressao
@@ -224,6 +237,8 @@ struct TapeStats
    long   maiorLote;     // maior negocio individual da janela
    double precoInicio;   // preco do primeiro negocio da janela
    double precoFim;      // preco do ultimo negocio da janela
+   double precoMax;      // maior preco negociado na janela
+   double precoMin;      // menor preco negociado na janela
 };
 
 
@@ -290,9 +305,9 @@ int OnInit()
    else
       Print("Modo cauteloso DESLIGADO");
 
-   if(InpUsarLimite && InpOrderValidSeg < 5)
+   if(InpUsarLimite && InpOrderValidBarras < 1)
    {
-      Print("Validade da ordem limite deve ser de ao menos 5 segundos");
+      Print("Validade da ordem limite deve ser de ao menos 1 barra");
       return INIT_PARAMETERS_INCORRECT;
    }
    if(InpSinaisIgnoraTend > 0 && InpSinaisIgnoraTend < InpMinSinais)
@@ -742,7 +757,7 @@ TapeStats LerFita(int segundos, ulong fimMs)
    t.valido = false;
    t.negocios = 0;
    t.volCompra = t.volVenda = t.volNeutro = t.volGrandesLiq = t.maiorLote = 0;
-   t.precoInicio = t.precoFim = 0.0;
+   t.precoInicio = t.precoFim = t.precoMax = t.precoMin = 0.0;
 
    if(fimMs == 0) return t;
    ulong inicioMs = (fimMs > (ulong)segundos * 1000) ? fimMs - (ulong)segundos * 1000 : 0;
@@ -767,9 +782,14 @@ TapeStats LerFita(int segundos, ulong fimMs)
       else if(lado < 0) t.volVenda  += v;
       else              t.volNeutro += v;   // volume preservado, sem lado
 
-      //--- primeiro e ultimo preco negociado na janela
+      //--- primeiro, ultimo e extremos do preco negociado na janela
       if(t.precoInicio <= 0.0) t.precoInicio = ticks[i].last;
-      if(ticks[i].last > 0.0)  t.precoFim    = ticks[i].last;
+      if(ticks[i].last > 0.0)
+      {
+         t.precoFim = ticks[i].last;
+         if(t.precoMax <= 0.0 || ticks[i].last > t.precoMax) t.precoMax = ticks[i].last;
+         if(t.precoMin <= 0.0 || ticks[i].last < t.precoMin) t.precoMin = ticks[i].last;
+      }
 
       if(v > t.maiorLote) t.maiorLote = v;
 
@@ -986,6 +1006,8 @@ bool HasPendingOrder()
 
 void CancelExpiredOrders()
 {
+   if(InpOrderValidBarras <= 0) return;
+
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       ulong ticket = OrderGetTicket(i);
@@ -993,15 +1015,18 @@ void CancelExpiredOrders()
       if(OrderGetString(ORDER_SYMBOL) != _Symbol ||
          OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
 
-      //--- validade em segundos: vida constante, independente de onde a barra estava
       datetime criada = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
-      long idade = (long)(TimeCurrent() - criada);
-      if(idade >= InpOrderValidSeg)
+      if(criada <= 0) continue;
+
+      //--- validade em BARRAS do grafico em que o EA esta: acompanha o
+      //--- tempo grafico em vez de ser um numero fixo de segundos
+      int barras = iBarShift(_Symbol, _Period, criada, false);
+      if(barras >= InpOrderValidBarras)
       {
          trade.OrderDelete(ticket);
          if(InpLog)
-            PrintFormat("Limite cancelada: %ds sem execucao (validade %d)",
-                        (int)idade, InpOrderValidSeg);
+            PrintFormat("Limite cancelada: %d barra(s) sem execucao (validade %d)",
+                        barras, InpOrderValidBarras);
       }
    }
 }
@@ -1465,7 +1490,7 @@ void GerenciarTrailing()
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| trade.OrderDelete(t) A LIMITE POR AGRESSAO CONTRA                             |
+//| CANCELAR A LIMITE POR AGRESSAO CONTRA                             |
 //+------------------------------------------------------------------+
 double RajTickSz()
 {
@@ -1473,14 +1498,13 @@ double RajTickSz()
    return (t > 0.0) ? t : _Point;
 }
 
-double RajVolTick(const MqlTick &t)
-{
-   return (t.volume_real > 0.0) ? t.volume_real : (double)t.volume;
-}
-
+//--- Volume REAL da barra, em contratos. Sem volume real nao ha com que
+//--- comparar o volume da fita, que tambem vem em contratos: devolve 0 e
+//--- a regra nao opina, em vez de comparar contratos com numero de
+//--- negocios e produzir um fator sem significado.
 double RajVolBar(const MqlRates &r)
 {
-   return (r.real_volume > 0) ? (double)r.real_volume : (double)r.tick_volume;
+   return (r.real_volume > 0) ? (double)r.real_volume : 0.0;
 }
 
 //--- direcao da ordem pendente deste EA: +1 compra, -1 venda, 0 nenhuma
@@ -1501,65 +1525,63 @@ int RajOrdemPendente(ulong &ticket)
    return 0;
 }
 
-//--- agressao dos ultimos InpRajJanelaSeg segundos ate agora: +1, -1 ou 0
+//--- Fluxo dos ultimos InpRajJanelaSeg segundos: +1 compra dominante,
+//--- -1 venda dominante, 0 sem dominio.
+//---
+//--- Usa LerFita, a MESMA leitura que alimenta os tres sinais, para que
+//--- a regra de cancelamento nao julgue a agressao por um criterio
+//--- diferente do resto do robo. Com isso herda de graca o LadoAgressor
+//--- de tres niveis, o teto de lote e o volume neutro no divisor.
 int RajadaAgora(double &fator)
 {
    fator = 0.0;
+
+   //--- volume normal de referencia, em contratos, a mesma unidade da fita
    MqlRates r[];
    ArraySetAsSeries(r, true);
    if(CopyRates(_Symbol, PERIOD_M1, 1, InpRajMediaN, r) < InpRajMediaN) return 0;
+
    double soma = 0.0;
-   for(int k = 0; k < InpRajMediaN; k++) soma += RajVolBar(r[k]);
-   double volNormal = soma / InpRajMediaN;            // volume de uma barra M1
-   if(volNormal <= 0.0) return 0;
-   double volJanela = volNormal * InpRajJanelaSeg / 60.0;
+   int    nb   = 0;
+   for(int k = 0; k < InpRajMediaN; k++)
+   {
+      double v = RajVolBar(r[k]);
+      if(v > 0.0) { soma += v; nb++; }
+   }
+   if(nb <= 0) return 0;                        // sem volume real: nao opina
+
+   double volJanela = (soma / nb) * InpRajJanelaSeg / 60.0;
    if(volJanela <= 0.0) return 0;
 
-   MqlTick tk[];
-   ulong ate = (ulong)TimeCurrent() * 1000 + 999;
-   ulong de  = ate - (ulong)InpRajJanelaSeg * 1000;
-   int n = CopyTicksRange(_Symbol, tk, COPY_TICKS_TRADE, de, ate);
-   if(n < 2) return 0;
+   MqlTick agora;
+   if(!SymbolInfoTick(_Symbol, agora) || agora.time_msc == 0) return 0;
 
-   //--- lado agressor: flags da bolsa; sem elas, regra do tick
-   bool temFlags = false;
-   for(int i = 0; i < n && !temFlags; i++)
-      if((tk[i].flags & (TICK_FLAG_BUY | TICK_FLAG_SELL)) != 0) temFlags = true;
+   TapeStats t = LerFita(InpRajJanelaSeg, agora.time_msc);
+   if(!t.valido) return 0;
 
-   double vc = 0.0, vv = 0.0;
-   double p0 = tk[0].last, mx = p0, mn = p0;
-   int    ultimo = 0;
-   for(int i = 0; i < n; i++)
-   {
-      int l = 0;
-      if(temFlags)
-      {
-         bool b = (tk[i].flags & TICK_FLAG_BUY)  != 0;
-         bool v = (tk[i].flags & TICK_FLAG_SELL) != 0;
-         l = (b && !v) ? 1 : (v && !b) ? -1 : 0;
-      }
-      else if(i > 0)
-      {
-         l = (tk[i].last > tk[i-1].last) ? 1 : (tk[i].last < tk[i-1].last) ? -1 : ultimo;
-         ultimo = l;
-      }
-      double vol = RajVolTick(tk[i]);
-      if(l > 0) vc += vol;
-      if(l < 0) vv += vol;
-      if(tk[i].last > 0.0)
-      {
-         mx = MathMax(mx, tk[i].last);
-         mn = MathMin(mn, tk[i].last);
-      }
-   }
+   //--- o neutro entra no divisor, como em todos os outros criterios
+   double total = (double)(t.volCompra + t.volVenda + t.volNeutro);
+   if(total <= 0.0) return 0;
 
-   double total = vc + vv;
    fator = total / volJanela;
-   if(total <= 0.0 || total < InpRajFator * volJanela) return 0;
+   if(fator < InpRajFator) return 0;
 
+   double dom    = InpRajDominioPct / 100.0 * total;
    double niveis = InpRajNiveis * RajTickSz();
-   if(vc >= InpRajDominioPct / 100.0 * total && mx - p0 >= niveis - RajTickSz() / 2) return  1;
-   if(vv >= InpRajDominioPct / 100.0 * total && p0 - mn >= niveis - RajTickSz() / 2) return -1;
+
+   //--- o deslocamento so e exigido quando InpRajNiveis > 0. Com a
+   //--- limitada longe da ancora, o preco executa a ordem antes de
+   //--- conseguir deslocar, e exigir deslocamento aqui desliga a regra.
+   if((double)t.volCompra >= dom &&
+      (InpRajNiveis <= 0 ||
+       t.precoMax - t.precoInicio >= niveis - RajTickSz() / 2))
+      return 1;
+
+   if((double)t.volVenda >= dom &&
+      (InpRajNiveis <= 0 ||
+       t.precoInicio - t.precoMin >= niveis - RajTickSz() / 2))
+      return -1;
+
    return 0;
 }
 
