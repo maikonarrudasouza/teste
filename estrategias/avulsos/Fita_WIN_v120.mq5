@@ -29,6 +29,13 @@
 //|          mesmo simbolo, netting faria um sobrescrever o SL/TP     |
 //|          do outro.                                                |
 //|                                                                   |
+//|  v1.22 - FILTRO DE TENDENCIA REMOVIDO. A media do M15 com zona     |
+//|          neutra barrava a maior parte das entradas no M1, e o       |
+//|          contexto direcional passa a ser so o delta acumulado da    |
+//|          sessao, que e leitura de fluxo e nao de grafico. Saiu      |
+//|          tambem o InpSinaisIgnoraTend, que existia apenas para      |
+//|          furar esse filtro.                                         |
+//|                                                                     |
 //|  v1.21 - a regra de cancelamento passa a usar LerFita, a mesma     |
 //|          leitura dos tres sinais, em vez de uma classificacao      |
 //|          propria que ignorava o LadoAgressor, o teto de lote e o   |
@@ -49,7 +56,7 @@
 //|          entrada. Fica ligado no minimo InpChopHoldMin minutos.   |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.21"
+#property version   "1.22"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -98,14 +105,6 @@ input EModoAcum   InpModoAcum      = ACUM_VARIACAO;   // Nivel absoluto ou varia
 input EAncoraAcum InpAncoraAcum    = ACUM_INICIO_DIA; // De onde comecar a acumular
 input int         InpAcumJanelaSeg = 600;             // [variacao] janela de comparacao (segundos)
 input long        InpAcumMinimo    = 500;             // Abaixo disso o acumulado nao opina
-
-//--- Filtro de tendencia
-input bool            InpUsarFiltroTend = true;        // Operar apenas a favor da tendencia
-input ENUM_TIMEFRAMES InpTFTendencia    = PERIOD_M15;  // Timeframe da media
-input int             InpMAPeriodo      = 50;          // Periodo da media
-input ENUM_MA_METHOD  InpMAMetodo       = MODE_EMA;    // Metodo da media
-input int             InpMADistMin      = 50;          // Zona neutra (pontos)
-input int    InpSinaisIgnoraTend = 3;      // Com N sinais concordando, ignora a tendencia (0 = nunca)
 
 //--- Ancora da ordem limite
 enum EAncoraLimite
@@ -190,7 +189,6 @@ datetime g_rajUltSeg = 0;     // leitura no maximo 1x por segundo
 
 //+------------------------------------------------------------------+
 CTrade   trade;
-int      hMA = INVALID_HANDLE;
 
 //--- delta acumulado da sessao
 long     deltaAcum  = 0;
@@ -312,11 +310,6 @@ int OnInit()
       Print("Validade da ordem limite deve ser de ao menos 1 barra");
       return INIT_PARAMETERS_INCORRECT;
    }
-   if(InpSinaisIgnoraTend > 0 && InpSinaisIgnoraTend < InpMinSinais)
-   {
-      Print("InpSinaisIgnoraTend precisa ser 0 ou >= InpMinSinais");
-      return INIT_PARAMETERS_INCORRECT;
-   }
    if(InpJanelaSeg < 3 || InpJanelaBaseSeg <= InpJanelaSeg)
    {
       Print("Janela curta deve ser >= 3s e menor que a janela base");
@@ -332,16 +325,6 @@ int OnInit()
                   "Exige acerto acima de %.1f%% so para empatar.",
                   InpStopPoints, InpTakePoints,
                   100.0 * InpStopPoints / (InpStopPoints + InpTakePoints));
-
-   if(InpUsarFiltroTend)
-   {
-      hMA = iMA(_Symbol, InpTFTendencia, InpMAPeriodo, 0, InpMAMetodo, PRICE_CLOSE);
-      if(hMA == INVALID_HANDLE)
-      {
-         Print("Falha ao criar a media de tendencia");
-         return INIT_FAILED;
-      }
-   }
 
    //--- buffer circular da janela base
    baseN = InpJanelaBaseSeg;
@@ -381,9 +364,6 @@ int OnInit()
                InpMinSinais);
    PrintFormat("Janela de %ds | referencia deslizante de %ds | lote grande >= %d contratos",
                InpJanelaSeg, InpJanelaBaseSeg, (int)InpLoteGrande);
-   if(InpUsarFiltroTend && InpSinaisIgnoraTend > 0)
-      PrintFormat("Com %d sinais concordando, a tendencia e ignorada "
-                  "(o acumulado NAO e)", InpSinaisIgnoraTend);
    if(InpUsarTrailing)
    {
       double tickSz = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -458,7 +438,6 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
-   if(hMA != INVALID_HANDLE) IndicatorRelease(hMA);
    RemoverPainel();
 }
 
@@ -973,24 +952,6 @@ double InicioRajada(int direcao, ulong fimMs)
 //+------------------------------------------------------------------+
 //| Utilitarios                                                      |
 //+------------------------------------------------------------------+
-int Tendencia()
-{
-   if(!InpUsarFiltroTend) return 0;
-
-   double ma[];
-   ArraySetAsSeries(ma, true);
-   if(CopyBuffer(hMA, 0, 0, 1, ma) < 1) return 0;
-   if(ma[0] <= 0.0) return 0;
-
-   double preco = iClose(_Symbol, InpTFTendencia, 0);
-   if(preco <= 0.0) return 0;
-
-   double dist = preco - ma[0];
-   if(MathAbs(dist) < InpMADistMin * _Point) return 0;
-
-   return (dist > 0.0) ? 1 : -1;
-}
-
 bool HasOpenPosition()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -1277,7 +1238,7 @@ string NomeDir(int d) { return (d > 0) ? "COMPRA" : ((d < 0) ? "VENDA" : "--"); 
 color  CorDir(int d)  { return (d > 0) ? InpCorCompra : ((d < 0) ? InpCorVenda : InpCorTexto); }
 
 void AtualizarPainel(const TapeStats &curta,
-                     int s1, int s2, int s3, int tend, string estado)
+                     int s1, int s2, int s3, string estado)
 {
    if(!InpMostrarPainel) return;
 
@@ -1285,7 +1246,7 @@ void AtualizarPainel(const TapeStats &curta,
    int L = 286;              // largura do painel
    int lin = 17;             // altura de cada linha
 
-   Retangulo("bg", X - 10, Y - 10, L, 285, InpCorFundo, false);
+   Retangulo("bg", X - 10, Y - 10, L, 268, InpCorFundo, false);
 
    int y = Y;
 
@@ -1373,12 +1334,6 @@ void AtualizarPainel(const TapeStats &curta,
    y += lin + 6;
 
    //--- contexto
-   string txtTend = InpUsarFiltroTend
-                    ? ((tend > 0) ? "ALTA" : ((tend < 0) ? "BAIXA" : "indefinida"))
-                    : "filtro off";
-   Rotulo("tend", X, y, StringFormat("Tendencia  %s", txtTend), CorDir(tend));
-   y += lin;
-
    if(InpUsarAcumulado)
    {
       int lado = LadoAcumulado();
@@ -1659,7 +1614,6 @@ void OnTick()
 
    int compras = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0);
    int vendas  = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0);
-   int tend    = Tendencia();
    int acum    = LadoAcumulado();
 
    //--- mercado indo e voltando: exige mais sinais concordando
@@ -1718,9 +1672,6 @@ void OnTick()
 
       int concordam = (direcao > 0) ? compras : vendas;
 
-      //--- sinal unanime o bastante dispensa o filtro de tendencia
-      bool ignoraTend = (InpSinaisIgnoraTend > 0 && concordam >= InpSinaisIgnoraTend);
-
       //--- teria entrado sem o modo cauteloso? Registra (no maximo a cada 30s)
       //--- para dar para medir depois quantas entradas a cautela evitou.
       bool barradoCaut = (direcao == 0 && caut &&
@@ -1741,32 +1692,13 @@ void OnTick()
       if(direcao == 0)
          estado = barradoCaut ? StringFormat("CAUTELA: exige %d sinais", minSinaisAtual)
                               : "AGUARDANDO SINAL";
-      else if(InpUsarFiltroTend && !ignoraTend && tend == 0)
-      {
-         estado = "TENDENCIA INDEFINIDA";
-         direcao = 0;
-      }
-      else if(InpUsarFiltroTend && !ignoraTend && direcao != tend)
-      {
-         estado = "CONTRA A TENDENCIA";
-         direcao = 0;
-      }
-      else if(ignoraTend && InpUsarFiltroTend && direcao != tend && tend != 0)
-      {
-         estado = StringFormat("%s FORCANDO (%d sinais)",
-                               direcao > 0 ? "COMPRA" : "VENDA", concordam);
-         if(InpLog)
-            PrintFormat("Sinal de %s contra a tendencia, mas com %d sinais concordando - entrando",
-                        direcao > 0 ? "COMPRA" : "VENDA", concordam);
-      }
       else
          estado = StringFormat("ENTRANDO %s", direcao > 0 ? "COMPRADO" : "VENDIDO");
 
-      //--- Validacao pelo acumulado. Ao contrario da tendencia, NAO e
-      //--- dispensada pelos 3 sinais: a tendencia e um filtro lento de
-      //--- grafico, mas o acumulado e o saldo real de agressao da sessao.
-      //--- Um pico de 15s contra o fluxo do dia inteiro e justamente o
-      //--- caso que se quer evitar.
+      //--- Validacao pelo acumulado. Com o filtro de tendencia fora,
+      //--- este e o UNICO contexto direcional que resta no robo: o saldo
+      //--- real de agressao da sessao. Um pico de 15s contra o fluxo do
+      //--- dia inteiro e justamente o caso que se quer evitar.
       //--- So barra quando aponta para o lado oposto: acumulado neutro
       //--- nao impede nada (de manha ele sempre esta perto de zero).
       if(direcao != 0 && InpUsarAcumulado && acum != 0 && acum != direcao)
@@ -1779,7 +1711,7 @@ void OnTick()
       }
    }
 
-   AtualizarPainel(curta, s1, s2, s3, tend, estado);
+   AtualizarPainel(curta, s1, s2, s3, estado);
 
    //--- DIAGNOSTICO: uma linha por InpLogDiagSeg segundos dizendo onde o
    //--- fluxo parou. Serve para nao ter que adivinhar qual portao barrou.
@@ -1791,11 +1723,11 @@ void OnTick()
          ultDiag = TimeCurrent();
          long total = curta.volCompra + curta.volVenda + curta.volNeutro;
          PrintFormat("DIAG | estado=%s | sinais C%d V%d (exige %d) | fita %d neg, vol %d | "
-                     "tend=%d acum=%d | pos=%s pend=%s | horario=%s | "
+                     "acum=%d | pos=%s pend=%s | horario=%s | "
                      "stopsLevel=%d stop=%d alvo=%d",
                      estado, compras, vendas, minSinaisAtual,
                      curta.negocios, (int)total,
-                     tend, LadoAcumulado(),
+                     LadoAcumulado(),
                      HasOpenPosition() ? "sim" : "nao",
                      HasPendingOrder() ? "sim" : "nao",
                      TimeAllowed() ? "ok" : "fora",
