@@ -42,8 +42,12 @@
 //|  PROTECAO                                                        |
 //|    Stop e alvo vao na bolsa junto com a ordem.                   |
 //|    Trailing proprio, a cada tick, so no stop.                    |
-//|    Agressao contra cancela a limitada pendente, nunca fecha      |
-//|    posicao aberta.                                               |
+//|    Fluxo contra cancela a limitada pendente, nunca fecha         |
+//|    posicao aberta. O cancelamento tem limiares PROPRIOS, mais     |
+//|    exigentes que os da entrada, porque cancelar destroi uma       |
+//|    oportunidade. Com CancNiveis em 0 ele julga so pelo volume e   |
+//|    pelo dominio, sem exigir deslocamento: quando a limitada esta  |
+//|    longe, o preco executa a ordem antes de conseguir deslocar.    |
 //|                                                                  |
 //|  Conta netting (B3): uma posicao por simbolo.                    |
 //|                                                                  |
@@ -115,7 +119,9 @@ input int    InpTrailDist      = 75;        // Distancia do stop ao preco (ponto
 
 input group "Cancelar a limitada por agressao contra"
 input bool   InpCancUsar       = true;      // Ligar a regra
-input int    InpCancNiveis     = 15;        // Niveis (ticks) contra a ordem
+input double InpCancFator      = 2.5;       // Volume da janela >= fator x volume normal
+input double InpCancDominio    = 80;        // % do volume agredido CONTRA a ordem
+input int    InpCancNiveis     = 0;         // Niveis (ticks) contra a ordem (0 = ignora o deslocamento)
 
 input group "Horario (hora do servidor)"
 input string InpInicio         = "09:15";   // Inicio das entradas
@@ -154,6 +160,11 @@ int      gVotos[3];                        // AMA, MACD, Stoch
 datetime gUltAgr   = 0;                    // ultima leitura da fita
 int      gAgrDir   = 0;                    // lado da agressao atual
 double   gAgrFator = 0;                    // fator de volume da janela
+double   gFitaFator = 0;                   // volume da janela / volume normal
+double   gFitaDomC  = 0;                   // % do volume agredido na compra
+double   gFitaDomV  = 0;                   // % do volume agredido na venda
+double   gFitaSubiu = 0;                   // ticks que o preco subiu na janela
+double   gFitaCaiu  = 0;                   // ticks que o preco caiu na janela
 double   gAgrIni   = 0;                    // preco do primeiro negocio da janela
 double   gAgrMax   = 0;                    // maior preco negociado na janela
 double   gAgrMin   = 0;                    // menor preco negociado na janela
@@ -475,6 +486,15 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
       return(false);
 
    fator = total / normal;
+
+   //--- publica a leitura crua. O cancelamento usa estes numeros com os
+   //--- seus proprios limiares, e nao os da entrada.
+   gFitaFator = fator;
+   gFitaDomC  = volC / total * 100.0;
+   gFitaDomV  = volV / total * 100.0;
+   gFitaSubiu = subiu;
+   gFitaCaiu  = caiu;
+
    if(fator < InpAgrFator)
       return(false);
 
@@ -683,27 +703,38 @@ void CancelarVencida()
 //| Cancela a limitada quando a agressao vem contra                  |
 //|  Nunca mexe em posicao aberta.                                   |
 //+------------------------------------------------------------------+
-void CancelarPorAgressao(const double subiu, const double caiu)
+void CancelarPorAgressao()
   {
    if(!InpCancUsar)
-      return;
-   if(gAgrDir == 0)
       return;
 
    ulong ticket;
    int   dir;
    if(!Pendente(ticket, dir))
       return;
-   if(dir == 0 || dir == gAgrDir)
+   if(dir == 0)
       return;
 
-   //--- a agressao contra tambem precisa ter deslocado o preco
-   double contra = (dir > 0) ? caiu : subiu;
-   if(contra < (double)InpCancNiveis)
+   //--- volume da janela, pelo limiar do cancelamento
+   if(gFitaFator < InpCancFator)
+      return;
+
+   //--- dominio do lado CONTRA a ordem
+   double dom = (dir > 0) ? gFitaDomV : gFitaDomC;
+   if(dom < InpCancDominio)
+      return;
+
+   //--- deslocamento contra a ordem, somente quando exigido.
+   //--- Com a limitada longe (offset grande), o preco nao consegue
+   //--- deslocar o bastante antes de executar, e exigir deslocamento
+   //--- aqui desliga a regra na pratica. Por isso o 0 existe.
+   double contra = (dir > 0) ? gFitaCaiu : gFitaSubiu;
+   if(InpCancNiveis > 0 && contra < (double)InpCancNiveis)
       return;
 
    if(trade.OrderDelete(ticket))
-      PrintFormat("Limitada cancelada: agressao contra de %.1fx, %.0f niveis", gAgrFator, contra);
+      PrintFormat("Limitada de %s cancelada: fluxo contra de %.1fx com %.0f%% de dominio, %.0f niveis",
+                  (dir > 0) ? "compra" : "venda", gFitaFator, dom, contra);
   }
 
 //+------------------------------------------------------------------+
@@ -842,7 +873,8 @@ void Painel()
                          NomeVoto(gVotos[0]), NomeVoto(gVotos[1]), NomeVoto(gVotos[2])), clrSilver);
    Linha(3, StringFormat("fita       %.1fx  (dispara em %.1fx)", gAgrFator, InpAgrFator),
          (gAgrFator >= InpAgrFator) ? clrGold : clrSilver);
-   Linha(4, StringFormat("agressao   %s", NomeVoto(gAgrDir)),
+   Linha(4, StringFormat("agressao   %s   (dom C %.0f%%  V %.0f%%)",
+                         NomeVoto(gAgrDir), gFitaDomC, gFitaDomV),
          (gAgrDir > 0) ? clrMediumSeaGreen : ((gAgrDir < 0) ? clrIndianRed : clrSilver));
    Linha(5, gBloqDia ? "dia BLOQUEADO por limite" : "dia liberado",
          gBloqDia ? clrIndianRed : clrSilver);
@@ -968,7 +1000,7 @@ void OnTick()
       gAgrDir   = d;
       gAgrFator = f;
 
-      CancelarPorAgressao(subiu, caiu);
+      CancelarPorAgressao();
      }
 
    Painel();
