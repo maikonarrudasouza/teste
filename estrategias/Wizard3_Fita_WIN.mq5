@@ -25,17 +25,17 @@
 //|  ENTRADA                                                         |
 //|    Modo 0: a mercado, no momento da agressao.                    |
 //|    Modo 1 (padrao): limitada, valida por ValidadeBarras barras    |
-//|    do grafico, como nos outros robos. De onde o preco e medido    |
-//|    depende de AncoraLimite:                                       |
-//|      0 = preco atual menos OffsetLimite pontos (numero redondo)  |
+//|    do grafico, como nos outros robos. O preco e sempre            |
+//|      ancora - OffsetLimite  numa COMPRA                           |
+//|      ancora + OffsetLimite  numa VENDA                            |
+//|    e a ancora vem de AncoraLimite:                                |
+//|      0 = preco atual                                              |
 //|      1 = INICIO DA AGRESSAO, o primeiro negocio da janela, que e  |
-//|          o padrao: espera o preco voltar ao ponto de onde o       |
-//|          fluxo partiu                                             |
+//|          o padrao                                                 |
 //|      2 = base do movimento, o menor preco negociado na janela     |
 //|          numa compra e o maior numa venda                         |
-//|    AncoraFolga move a ordem alem da ancora, para um preco ainda   |
-//|    melhor. AncoraMinPts descarta a ordem que nascer perto demais   |
-//|    do preco atual, que na pratica seria uma ordem a mercado.      |
+//|    AncoraMinPts descarta a ordem que nascer perto demais do       |
+//|    preco atual, que na pratica seria uma ordem a mercado.         |
 //|                                                                  |
 //|  PROTECAO                                                        |
 //|    Stop e alvo vao na bolsa junto com a ordem.                   |
@@ -95,9 +95,8 @@ input int    InpAgrMediaN      = 30;        // Barras M1 para medir o volume nor
 input group "Entrada"
 input int    InpModoEntrada    = 1;         // 0 = a mercado | 1 = limitada
 input int    InpAncoraLimite   = 1;         // 0 = preco atual | 1 = inicio da agressao | 2 = base do movimento
-input int    InpAncoraFolga    = 0;         // [ancora 1 e 2] pontos ALEM da ancora
+input int    InpOffsetLimite   = 250;       // Pontos a partir da ancora (compra abaixo, venda acima)
 input int    InpAncoraMinPts   = 25;        // Distancia minima do preco atual (abaixo disso nao manda)
-input int    InpOffsetLimite   = 100;       // [ancora 0] pontos melhor que o preco atual
 input int    InpValidadeBarras = 3;         // [modo 1] validade da limitada (barras)
 
 input group "Stop e alvo"
@@ -488,12 +487,13 @@ bool EnviarEntrada(const int dir)
       if(InpAncoraLimite == 2)
          ancora = (dir > 0) ? gAgrMin : gAgrMax;
 
+   if(InpAncoraLimite == 0 || ancora <= 0.0)
+      ancora = t.last;
+
    if(dir > 0)
      {
-      if(InpAncoraLimite == 0 || ancora <= 0.0)
-         preco = ArredTick(t.last - InpOffsetLimite * _Point);
-      else
-         preco = ArredTick(ancora - InpAncoraFolga * _Point);
+      //--- compra: tantos pontos ABAIXO da ancora
+      preco = ArredTick(ancora - InpOffsetLimite * _Point);
 
       //--- compra limitada tem que ficar abaixo do preco, e longe o
       //--- suficiente para nao ser uma ordem a mercado disfarcada
@@ -508,10 +508,8 @@ bool EnviarEntrada(const int dir)
       return(trade.BuyLimit(InpLotes, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, "W3F agressao"));
      }
 
-   if(InpAncoraLimite == 0 || ancora <= 0.0)
-      preco = ArredTick(t.last + InpOffsetLimite * _Point);
-   else
-      preco = ArredTick(ancora + InpAncoraFolga * _Point);
+   //--- venda: tantos pontos ACIMA da ancora
+   preco = ArredTick(ancora + InpOffsetLimite * _Point);
 
    //--- venda limitada tem que ficar acima do preco
    if(preco <= t.bid)
@@ -745,6 +743,11 @@ int OnInit()
    if(InpAncoraLimite < 0 || InpAncoraLimite > 2)
      {
       Print("InpAncoraLimite aceita apenas 0, 1 ou 2");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+   if(InpOffsetLimite < 0)
+     {
+      Print("InpOffsetLimite nao pode ser negativo");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
