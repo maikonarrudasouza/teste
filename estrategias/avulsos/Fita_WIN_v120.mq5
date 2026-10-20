@@ -29,12 +29,20 @@
 //|          mesmo simbolo, netting faria um sobrescrever o SL/TP     |
 //|          do outro.                                                |
 //|                                                                   |
+//|  v1.23 - FILTROS DA FITA REMOVIDOS. Saiu o delta acumulado da      |
+//|          sessao (InpUsarAcumulado e toda a maquina de historico    |
+//|          circular) e saiu o MODO CAUTELOSO (InpUsarFiltroChop e a  |
+//|          contagem de reversoes). A decisao passa a ser so a        |
+//|          leitura dos tres sinais da fita: InpMinSinais             |
+//|          concordando abre a ordem, sem nenhum contexto direcional  |
+//|          por cima. Ficaram os controles operacionais (horario,     |
+//|          intervalo minimo entre entradas e exigencia de conta      |
+//|          hedging), que nao sao filtros de fita.                    |
+//|                                                                     |
 //|  v1.22 - FILTRO DE TENDENCIA REMOVIDO. A media do M15 com zona     |
-//|          neutra barrava a maior parte das entradas no M1, e o       |
-//|          contexto direcional passa a ser so o delta acumulado da    |
-//|          sessao, que e leitura de fluxo e nao de grafico. Saiu      |
-//|          tambem o InpSinaisIgnoraTend, que existia apenas para      |
-//|          furar esse filtro.                                         |
+//|          neutra barrava a maior parte das entradas no M1. Saiu     |
+//|          tambem o InpSinaisIgnoraTend, que existia apenas para     |
+//|          furar esse filtro.                                        |
 //|                                                                     |
 //|  v1.21 - a regra de cancelamento passa a usar LerFita, a mesma     |
 //|          leitura dos tres sinais, em vez de uma classificacao      |
@@ -50,13 +58,9 @@
 //|          rajada, offset 250, stop 120 e alvo 75.                   |
 //|                                                                    |
 //|  v1.20 - offset da limite padrao = 150 pontos.                    |
-//|          MODO CAUTELOSO: quando o preco vai e volta (N reversoes  |
-//|          de pelo menos X pontos na janela), o robo passa a exigir |
-//|          mais sinais concordando. Nao bloqueia: so aperta a        |
-//|          entrada. Fica ligado no minimo InpChopHoldMin minutos.   |
 //+------------------------------------------------------------------+
 #property copyright "Maikon"
-#property version   "1.22"
+#property version   "1.23"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -84,27 +88,6 @@ input int    InpMinNegocios      = 20;     // Minimo de negocios na janela para 
 //--- Sinal 3: desequilibrio
 input double InpDesequilibrioMin = 0.60;   // 0.60 = um lado com 80% do volume agredido
 input long   InpVolMinJanela     = 300;    // Volume minimo na janela para o sinal valer
-
-//--- Delta acumulado: validacao pelo saldo de agressao da sessao
-enum EAncoraAcum
-{
-   ACUM_INICIO_DIA = 0,   // Desde a abertura do pregao (reconstroi do historico)
-   ACUM_INICIO_EA  = 1    // Desde que o EA foi carregado
-};
-
-//--- MODO do acumulado. Ver o bloco DELTA ACUMULADO mais abaixo
-//--- para por que o nivel absoluto nao funciona como filtro.
-enum EModoAcum
-{
-   ACUM_NIVEL    = 0,   // Saldo total desde a ancora (trava num lado so)
-   ACUM_VARIACAO = 1    // Quanto o saldo mudou na ultima janela
-};
-
-input bool        InpUsarAcumulado = true;            // Validar pelo delta acumulado
-input EModoAcum   InpModoAcum      = ACUM_VARIACAO;   // Nivel absoluto ou variacao recente
-input EAncoraAcum InpAncoraAcum    = ACUM_INICIO_DIA; // De onde comecar a acumular
-input int         InpAcumJanelaSeg = 600;             // [variacao] janela de comparacao (segundos)
-input long        InpAcumMinimo    = 500;             // Abaixo disso o acumulado nao opina
 
 //--- Ancora da ordem limite
 enum EAncoraLimite
@@ -135,16 +118,6 @@ input int    InpDegrauPts        = 5;      // A cada N pontos que o preco andar,
 input bool   InpUseTimeFilter    = true;   // Ativar filtro de horario
 input int    InpStartHour        = 9;      // Hora inicial (servidor)
 input int    InpEndHour          = 17;     // Hora final (servidor)
-
-//--- MODO CAUTELOSO (mercado indo e voltando)
-//--- Reversao = o preco vira de direcao andando ao menos InpChopPts contra
-//--- o ultimo topo/fundo. Nao bloqueia: so exige mais sinais concordando.
-input bool   InpUsarFiltroChop   = true;   // Apertar a entrada quando o mercado vai e volta
-input int    InpChopJanelaMin    = 30;     // Janela de leitura (minutos)
-input int    InpChopPts          = 200;    // Recuo minimo para contar uma reversao (pontos)
-input int    InpChopReversoes    = 2;      // Reversoes na janela que ligam o modo cauteloso
-input int    InpChopHoldMin      = 20;     // Fica cauteloso por no minimo (minutos)
-input int    InpChopMinSinais    = 3;      // Sinais concordando exigidos no modo cauteloso
 
 //--- Controle de frequencia
 input int    InpMinSegEntre      = 300;    // Segundos minimos entre uma entrada e a proxima
@@ -190,30 +163,10 @@ datetime g_rajUltSeg = 0;     // leitura no maximo 1x por segundo
 //+------------------------------------------------------------------+
 CTrade   trade;
 
-//--- delta acumulado da sessao
-long     deltaAcum  = 0;
-ulong    acumAteMs  = 0;      // ate que instante ja foi acumulado
-datetime diaDoAcum  = 0;      // dia a que o acumulado pertence
-
-//--- historico do acumulado, um ponto por segundo, em buffer circular.
-//--- Serve para medir a VARIACAO do saldo na janela, que e o que
-//--- diz quem esta ganhando AGORA. O nivel absoluto so diz quem
-//--- ganhou desde a abertura, e isso trava num lado so.
-long     acumHist[];
-int      acumHistN   = 0;
-ulong    acumHistSeg = 0;     // ultimo segundo gravado
-int      acumHistCheios = 0;
-long     acumVariacao = 0;    // deltaAcum de agora menos o de InpAcumJanelaSeg atras
 datetime horaUltimaEntrada = 0;
 ulong    ultimaAvaliacaoMs = 0;
 
-//--- modo cauteloso
-datetime chopUltBarra = 0;    // ultima barra M1 ja lida
-datetime chopAte      = 0;    // cauteloso ate este instante
-bool     chopAtivo    = false;
-int      chopRev      = 0;    // reversoes contadas na ultima leitura
 int      sinaisAtivos = 0;    // quantos dos 3 sinais estao ligados
-int      minSinaisAtual = 0;  // sinais exigidos AGORA (muda no modo cauteloso)
 
 //--- JANELA BASE DESLIZANTE
 //--- negocios por segundo num buffer circular. Em vez de reler a
@@ -279,31 +232,7 @@ int OnInit()
                   InpMinSinais, ativos);
       return INIT_PARAMETERS_INCORRECT;
    }
-   sinaisAtivos   = ativos;
-   minSinaisAtual = InpMinSinais;
-
-   if(InpUsarFiltroChop)
-   {
-      if(InpChopJanelaMin < 5 || InpChopPts <= 0 || InpChopReversoes < 1 ||
-         InpChopHoldMin < 0 || InpChopMinSinais < 1)
-      {
-         Print("Parametros do modo cauteloso invalidos (janela>=5, pontos>0, "
-               "reversoes>=1, hold>=0, sinais>=1)");
-         return INIT_PARAMETERS_INCORRECT;
-      }
-      if(InpChopMinSinais > ativos)
-         PrintFormat("Atencao: o modo cauteloso pede %d sinais, mas so ha %d ligados - "
-                     "sera usado %d", InpChopMinSinais, ativos, ativos);
-      else if(InpChopMinSinais <= InpMinSinais)
-         Print("Atencao: InpChopMinSinais nao e maior que InpMinSinais - "
-               "o modo cauteloso nao vai apertar nada");
-      PrintFormat("Modo cauteloso: %d reversoes de %d+ pts em %d min liga a cautela "
-                  "(exige %d sinais, fica ligado ao menos %d min)",
-                  InpChopReversoes, InpChopPts, InpChopJanelaMin,
-                  MathMin(InpChopMinSinais, ativos), InpChopHoldMin);
-   }
-   else
-      Print("Modo cauteloso DESLIGADO");
+   sinaisAtivos = ativos;
 
    if(InpUsarLimite && InpOrderValidBarras < 1)
    {
@@ -337,23 +266,6 @@ int OnInit()
    baseTotal  = 0;
    baseCheios = 0;
    baseUltSeg = 0;
-
-   //--- buffer circular do historico do acumulado
-   if(InpUsarAcumulado && InpModoAcum == ACUM_VARIACAO)
-   {
-      acumHistN = InpAcumJanelaSeg;
-      if(acumHistN < 30)   acumHistN = 30;
-      if(acumHistN > 7200) acumHistN = 7200;
-      if(ArrayResize(acumHist, acumHistN) != acumHistN)
-      {
-         Print("Falha ao alocar o historico do acumulado");
-         return INIT_FAILED;
-      }
-      ArrayInitialize(acumHist, 0);
-      acumHistSeg    = 0;
-      acumHistCheios = 0;
-      acumVariacao   = 0;
-   }
 
    if(InpBootstrapBase) BootstrapBase();
 
@@ -408,16 +320,6 @@ int OnInit()
                   "Sem o trailing, o alvo e a unica saida de lucro - "
                   "reveja se %d pontos e alcancavel.",
                   InpTakePoints, InpTakePoints);
-   if(InpUsarAcumulado && InpModoAcum == ACUM_NIVEL)
-      Print("ATENCAO: acumulado em modo NIVEL. Depois de algumas horas ele "
-            "nao volta mais perto de zero e vira uma trava fixa num lado so. "
-            "Se o robo parar de operar, e provavelmente isto.");
-   if(InpUsarAcumulado)
-      PrintFormat("Acumulado %s | neutro abaixo de %d contratos",
-                  InpAncoraAcum == ACUM_INICIO_DIA ? "desde a abertura do pregao"
-                                                   : "desde a carga do EA",
-                  (int)InpAcumMinimo);
-
    //--- ficha do simbolo
    long nivelMinStop = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    PrintFormat("--- %s | digitos=%d | point=%.*f | tick=%.*f | nivel minimo de stop=%d pontos",
@@ -454,8 +356,8 @@ void OnDeinit(const int reason)
 //| CLASSIFICACAO DO AGRESSOR                                        |
 //|                                                                   |
 //| Ponto unico onde se decide de que lado foi a agressao. Todas as   |
-//| leituras (fita, contagem, acumulado) passam por aqui, para que    |
-//| nenhuma use um criterio diferente da outra.                       |
+//| leituras da fita passam por aqui, para que nenhuma use um         |
+//| criterio diferente da outra.                                      |
 //|                                                                   |
 //| Ordem de decisao:                                                 |
 //|   1. flag BUY ou SELL do feed - e a informacao da bolsa           |
@@ -606,136 +508,6 @@ double VelocidadeBase()
 {
    if(baseCheios <= 0) return 0.0;
    return (double)baseTotal / baseCheios;
-}
-
-//+------------------------------------------------------------------+
-//| DELTA ACUMULADO DA SESSAO                                        |
-//|                                                                   |
-//| Soma de todo o volume agredido na compra menos o agredido na      |
-//| venda, desde a ancora escolhida. Diz qual lado dominou a sessao.  |
-//|                                                                   |
-//| Calculado uma vez do historico e depois so incrementado, para     |
-//| nao reler o dia inteiro a cada segundo.                           |
-//+------------------------------------------------------------------+
-long DeltaNoIntervalo(ulong deMs, ulong ateMs)
-{
-   if(ateMs <= deMs) return 0;
-
-   MqlTick ticks[];
-   int n = CopyTicksRange(_Symbol, ticks, COPY_TICKS_TRADE, deMs, ateMs);
-   if(n <= 0) return 0;
-
-   long   d = 0;
-   double ultPreco = 0.0;
-   for(int i = 0; i < n; i++)
-   {
-      long v = (long)ticks[i].volume;
-      if(v <= 0) continue;
-      if(InpLoteTeto > 0 && v > InpLoteTeto) continue;
-
-      int lado = LadoAgressor(ticks[i], ultPreco);
-      if(lado != 0) d += lado * v;
-   }
-   return d;
-}
-
-void AtualizarAcumulado(ulong agoraMs)
-{
-   if(!InpUsarAcumulado || agoraMs == 0) return;
-
-   datetime hoje = iTime(_Symbol, PERIOD_D1, 0);
-
-   //--- virou o dia: zera e recomeca
-   if(InpAncoraAcum == ACUM_INICIO_DIA && hoje != diaDoAcum)
-   {
-      diaDoAcum = hoje;
-      acumAteMs = 0;
-      deltaAcum = 0;
-   }
-
-   //--- o milissegundo corrente pode ainda estar recebendo negocios.
-   //--- Fechar nele perderia os que chegarem depois da leitura, porque a
-   //--- proxima comeca em +1. Para em -1 e deixa o ms atual para a proxima.
-   if(agoraMs == 0) return;
-   ulong ateMs = agoraMs - 1;
-
-   //--- primeira vez: reconstroi do historico
-   if(acumAteMs == 0)
-   {
-      ulong iniMs = (InpAncoraAcum == ACUM_INICIO_DIA && hoje > 0)
-                    ? (ulong)hoje * 1000
-                    : ateMs;
-
-      deltaAcum = (iniMs < ateMs) ? DeltaNoIntervalo(iniMs, ateMs) : 0;
-      acumAteMs = ateMs;
-      diaDoAcum = hoje;
-
-      if(InpLog)
-         PrintFormat("Delta acumulado iniciado em %d contratos (%s)",
-                     (int)deltaAcum,
-                     InpAncoraAcum == ACUM_INICIO_DIA ? "desde a abertura" : "desde agora");
-      return;
-   }
-
-   //--- incremento: so o que entrou desde a ultima leitura
-   if(ateMs > acumAteMs)
-   {
-      deltaAcum += DeltaNoIntervalo(acumAteMs + 1, ateMs);
-      acumAteMs = ateMs;
-   }
-
-   //--- grava o ponto deste segundo e mede a variacao na janela.
-   //--- O valor que esta prestes a ser sobrescrito no buffer
-   //--- circular E exatamente o de acumHistN segundos atras.
-   if(InpModoAcum == ACUM_VARIACAO && acumHistN > 0)
-   {
-      ulong seg = ateMs / 1000;
-      if(seg > acumHistSeg)
-      {
-         //--- buraco maior que a janela: o historico nao serve mais
-         if(acumHistSeg > 0 && seg - acumHistSeg >= (ulong)acumHistN)
-         {
-            ArrayInitialize(acumHist, 0);
-            acumHistCheios = 0;
-         }
-
-         int idx = (int)(seg % (ulong)acumHistN);
-         long antigo = acumHist[idx];
-         acumHist[idx] = deltaAcum;
-
-         if(acumHistCheios >= acumHistN)
-            acumVariacao = deltaAcum - antigo;
-         else
-         {
-            acumHistCheios++;
-            acumVariacao = 0;      // ainda aquecendo: nao opina
-         }
-
-         acumHistSeg = seg;
-      }
-   }
-}
-
-//--- +1 comprador dominando, -1 vendedor, 0 sem opiniao
-int LadoAcumulado()
-{
-   if(!InpUsarAcumulado) return 0;
-
-   //--- NIVEL: o saldo desde a abertura. Util para entender o dia,
-   //--- ruim como filtro - depois de algumas horas ele nunca mais
-   //--- volta perto de zero e vira uma trava fixa num lado so.
-   if(InpModoAcum == ACUM_NIVEL)
-   {
-      if(MathAbs(deltaAcum) < InpAcumMinimo) return 0;
-      return (deltaAcum > 0) ? 1 : -1;
-   }
-
-   //--- VARIACAO: quanto o saldo mudou na ultima janela. Volta a
-   //--- zero sozinho quando o fluxo equilibra, entao pode barrar
-   //--- hoje e liberar daqui a dez minutos.
-   if(acumHistCheios < acumHistN) return 0;   // ainda aquecendo
-   if(MathAbs(acumVariacao) < InpAcumMinimo) return 0;
-   return (acumVariacao > 0) ? 1 : -1;
 }
 
 //+------------------------------------------------------------------+
@@ -1067,116 +839,6 @@ double CalcLots()
 }
 
 //+------------------------------------------------------------------+
-//| MODO CAUTELOSO - MERCADO INDO E VOLTANDO                         |
-//|                                                                   |
-//| Conta reversoes de um zigzag de InpChopPts pontos sobre as barras |
-//| M1 fechadas da janela. A primeira pernada so define a direcao; a  |
-//| partir dela, cada vez que o preco vira ao menos InpChopPts contra |
-//| o ultimo extremo, conta uma reversao.                              |
-//|                                                                   |
-//| Cada barra vira dois pontos de preco, na ordem provavel: barra de |
-//| alta passa pela minima antes da maxima, barra de baixa o inverso. |
-//| Sem isso, uma barra grande de alta contaria como reversao so por  |
-//| ter minima e maxima distantes.                                     |
-//+------------------------------------------------------------------+
-int ContarReversoes(const MqlRates &r[], int n, double limite)
-{
-   if(n < 2 || limite <= 0.0) return 0;
-
-   int    dir = 0, rev = 0, iHi = 0, iLo = 0;
-   double extremo = 0.0, hi = 0.0, lo = 0.0;
-   bool   inicio = true;
-
-   for(int i = 0; i < n; i++)
-   {
-      bool   alta = (r[i].close >= r[i].open);
-      double p0   = alta ? r[i].low  : r[i].high;
-      double p1   = alta ? r[i].high : r[i].low;
-
-      for(int k = 0; k < 2; k++)
-      {
-         double p   = (k == 0) ? p0 : p1;
-         int    idx = i * 2 + k;
-
-         if(inicio)
-         {
-            hi = lo = p;
-            iHi = iLo = idx;
-            inicio = false;
-            continue;
-         }
-
-         if(dir == 0)
-         {
-            //--- ainda sem direcao: espera a primeira pernada de ao menos limite
-            if(p > hi) { hi = p; iHi = idx; }
-            if(p < lo) { lo = p; iLo = idx; }
-            if(hi - lo >= limite)
-            {
-               if(iHi > iLo) { dir =  1; extremo = hi; }
-               else          { dir = -1; extremo = lo; }
-            }
-         }
-         else if(dir == 1)
-         {
-            if(p > extremo)                       extremo = p;
-            else if(extremo - p >= limite)      { rev++; dir = -1; extremo = p; }
-         }
-         else
-         {
-            if(p < extremo)                       extremo = p;
-            else if(p - extremo >= limite)      { rev++; dir =  1; extremo = p; }
-         }
-      }
-   }
-   return rev;
-}
-
-//--- relê o mercado uma vez por barra M1 fechada
-void AtualizarChop()
-{
-   if(!InpUsarFiltroChop) return;
-
-   datetime t = iTime(_Symbol, PERIOD_M1, 0);
-   if(t <= 0 || t == chopUltBarra) return;
-   chopUltBarra = t;
-
-   MqlRates r[];
-   ArraySetAsSeries(r, false);                      // do mais antigo para o mais novo
-   int n = CopyRates(_Symbol, PERIOD_M1, 1, InpChopJanelaMin, r);
-   if(n < InpChopJanelaMin / 2) return;             // historico insuficiente
-
-   chopRev = ContarReversoes(r, n, InpChopPts * _Point);
-
-   if(chopRev >= InpChopReversoes)
-   {
-      if(!chopAtivo && InpLog)
-         PrintFormat("MODO CAUTELOSO ligado: %d reversoes de %d+ pts em %d min "
-                     "(exige %d sinais concordando)",
-                     chopRev, InpChopPts, InpChopJanelaMin,
-                     MathMin(InpChopMinSinais, sinaisAtivos));
-      chopAtivo = true;
-      chopAte   = TimeCurrent() + InpChopHoldMin * 60;
-   }
-}
-
-//--- true enquanto o mercado esta indo e voltando (e por InpChopHoldMin depois)
-bool ModoCauteloso()
-{
-   if(!InpUsarFiltroChop) return false;
-
-   AtualizarChop();
-
-   if(chopAtivo && TimeCurrent() >= chopAte)
-   {
-      chopAtivo = false;
-      if(InpLog)
-         Print("Modo cauteloso desligado: mercado voltou a andar");
-   }
-   return chopAtivo;
-}
-
-//+------------------------------------------------------------------+
 //| PAINEL NO GRAFICO                                                |
 //+------------------------------------------------------------------+
 #define PFX "FitaP_"
@@ -1246,7 +908,7 @@ void AtualizarPainel(const TapeStats &curta,
    int L = 286;              // largura do painel
    int lin = 17;             // altura de cada linha
 
-   Retangulo("bg", X - 10, Y - 10, L, 268, InpCorFundo, false);
+   Retangulo("bg", X - 10, Y - 10, L, 251, InpCorFundo, false);
 
    int y = Y;
 
@@ -1328,36 +990,9 @@ void AtualizarPainel(const TapeStats &curta,
    int maior   = MathMax(compras, vendas);
 
    Rotulo("conc", X, y,
-          StringFormat("Concordam  %d de %d necessarios%s", maior, minSinaisAtual,
-                       chopAtivo ? " CAUT" : ""),
-          (maior >= minSinaisAtual) ? InpCorCompra : (chopAtivo ? InpCorVenda : InpCorTexto));
+          StringFormat("Concordam  %d de %d necessarios", maior, InpMinSinais),
+          (maior >= InpMinSinais) ? InpCorCompra : InpCorTexto);
    y += lin + 6;
-
-   //--- contexto
-   if(InpUsarAcumulado)
-   {
-      int lado = LadoAcumulado();
-      if(InpModoAcum == ACUM_VARIACAO)
-      {
-         if(acumHistCheios < acumHistN)
-            Rotulo("acum", X, y,
-                   StringFormat("Acum %ds  aquecendo %d%%", InpAcumJanelaSeg,
-                                (acumHistN > 0) ? (int)(100.0 * acumHistCheios / acumHistN) : 0),
-                   InpCorTexto);
-         else
-            Rotulo("acum", X, y,
-                   StringFormat("Acum %ds  %+d  %s", InpAcumJanelaSeg,
-                                (int)acumVariacao, NomeDir(lado)),
-                   CorDir(lado));
-      }
-      else
-         Rotulo("acum", X, y,
-                StringFormat("Acumulado  %+d  %s", (int)deltaAcum, NomeDir(lado)),
-                CorDir(lado));
-   }
-   else
-      Rotulo("acum", X, y, "Acumulado  filtro off", InpCorTexto);
-   y += lin;
 
    Rotulo("est", X, y, StringFormat("Estado     %s", estado), InpCorTexto);
 
@@ -1595,9 +1230,6 @@ void OnTick()
    if(agora.time_msc - ultimaAvaliacaoMs < 1000) return;
    ultimaAvaliacaoMs = agora.time_msc;
 
-   //--- acumulado do dia (ou da sessao do EA)
-   AtualizarAcumulado(agora.time_msc);
-
    //--- avanca a janela base deslizante (le apenas o segundo que entrou)
    AtualizarBase(agora.time_msc);
 
@@ -1614,12 +1246,6 @@ void OnTick()
 
    int compras = (s1 > 0 ? 1 : 0) + (s2 > 0 ? 1 : 0) + (s3 > 0 ? 1 : 0);
    int vendas  = (s1 < 0 ? 1 : 0) + (s2 < 0 ? 1 : 0) + (s3 < 0 ? 1 : 0);
-   int acum    = LadoAcumulado();
-
-   //--- mercado indo e voltando: exige mais sinais concordando
-   bool caut = ModoCauteloso();
-   minSinaisAtual = caut ? MathMin(MathMax(InpChopMinSinais, InpMinSinais), sinaisAtivos)
-                         : InpMinSinais;
 
    string estado   = "AGUARDANDO SINAL";
    bool   podeOperar = true;
@@ -1667,48 +1293,13 @@ void OnTick()
    int direcao = 0;
    if(podeOperar)
    {
-      if(compras >= minSinaisAtual)      direcao =  1;
-      else if(vendas >= minSinaisAtual)  direcao = -1;
-
-      int concordam = (direcao > 0) ? compras : vendas;
-
-      //--- teria entrado sem o modo cauteloso? Registra (no maximo a cada 30s)
-      //--- para dar para medir depois quantas entradas a cautela evitou.
-      bool barradoCaut = (direcao == 0 && caut &&
-                          MathMax(compras, vendas) >= InpMinSinais);
-      if(barradoCaut && InpLog)
-      {
-         static datetime ultLogCaut = 0;
-         if(TimeCurrent() - ultLogCaut >= 30)
-         {
-            ultLogCaut = TimeCurrent();
-            PrintFormat("Modo cauteloso: %d sinal(is) %s, exige %d - nao entrou",
-                        MathMax(compras, vendas),
-                        (compras > vendas) ? "de COMPRA" : "de VENDA",
-                        minSinaisAtual);
-         }
-      }
+      if(compras >= InpMinSinais)      direcao =  1;
+      else if(vendas >= InpMinSinais)  direcao = -1;
 
       if(direcao == 0)
-         estado = barradoCaut ? StringFormat("CAUTELA: exige %d sinais", minSinaisAtual)
-                              : "AGUARDANDO SINAL";
+         estado = "AGUARDANDO SINAL";
       else
          estado = StringFormat("ENTRANDO %s", direcao > 0 ? "COMPRADO" : "VENDIDO");
-
-      //--- Validacao pelo acumulado. Com o filtro de tendencia fora,
-      //--- este e o UNICO contexto direcional que resta no robo: o saldo
-      //--- real de agressao da sessao. Um pico de 15s contra o fluxo do
-      //--- dia inteiro e justamente o caso que se quer evitar.
-      //--- So barra quando aponta para o lado oposto: acumulado neutro
-      //--- nao impede nada (de manha ele sempre esta perto de zero).
-      if(direcao != 0 && InpUsarAcumulado && acum != 0 && acum != direcao)
-      {
-         estado = StringFormat("CONTRA O ACUMULADO (%+d)", (int)deltaAcum);
-         if(InpLog)
-            PrintFormat("Sinal de %s com %d sinais barrado pelo acumulado de %d contratos",
-                        direcao > 0 ? "COMPRA" : "VENDA", concordam, (int)deltaAcum);
-         direcao = 0;
-      }
    }
 
    AtualizarPainel(curta, s1, s2, s3, estado);
@@ -1723,11 +1314,10 @@ void OnTick()
          ultDiag = TimeCurrent();
          long total = curta.volCompra + curta.volVenda + curta.volNeutro;
          PrintFormat("DIAG | estado=%s | sinais C%d V%d (exige %d) | fita %d neg, vol %d | "
-                     "acum=%d | pos=%s pend=%s | horario=%s | "
+                     "pos=%s pend=%s | horario=%s | "
                      "stopsLevel=%d stop=%d alvo=%d",
-                     estado, compras, vendas, minSinaisAtual,
+                     estado, compras, vendas, InpMinSinais,
                      curta.negocios, (int)total,
-                     LadoAcumulado(),
                      HasOpenPosition() ? "sim" : "nao",
                      HasPendingOrder() ? "sim" : "nao",
                      TimeAllowed() ? "ok" : "fora",
