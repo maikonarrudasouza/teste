@@ -166,6 +166,8 @@ input color  InpCorFundo         = C'22,22,26';      // Cor de fundo do painel
 input int    InpMagic            = 470791;
 input int    InpSlippage         = 20;
 input bool   InpLog              = true;   // Registrar sinais no log
+input bool   InpLogDiag          = true;   // Registrar no log, periodicamente, por que NAO entrou
+input int    InpLogDiagSeg       = 30;     // Intervalo do diagnostico (segundos)
 
 //+------------------------------------------------------------------+
 //| CANCELAR A LIMITE POR AGRESSAO CONTRA                             |
@@ -437,9 +439,19 @@ int OnInit()
                   (int)InpAcumMinimo);
 
    //--- ficha do simbolo
-   PrintFormat("--- %s | digitos=%d | point=%.*f | tick=%.*f",
+   long nivelMinStop = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   PrintFormat("--- %s | digitos=%d | point=%.*f | tick=%.*f | nivel minimo de stop=%d pontos",
                _Symbol, _Digits, _Digits, _Point,
-               _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE));
+               _Digits, SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE),
+               (int)nivelMinStop);
+
+   //--- o Entrar descarta a ordem quando o stop OU o alvo nao alcancam
+   //--- esse nivel. Melhor saber na carga do que descobrir depois com o
+   //--- robo em silencio.
+   if(nivelMinStop > 0 && (InpStopPoints < nivelMinStop || InpTakePoints < nivelMinStop))
+      PrintFormat("ERRO: stop %d / alvo %d nao alcancam o nivel minimo de %d pontos - "
+                  "NENHUMA ordem sera enviada. Suba o menor dos dois.",
+                  InpStopPoints, InpTakePoints, (int)nivelMinStop);
 
    return INIT_SUCCEEDED;
 }
@@ -1768,6 +1780,29 @@ void OnTick()
    }
 
    AtualizarPainel(curta, s1, s2, s3, tend, estado);
+
+   //--- DIAGNOSTICO: uma linha por InpLogDiagSeg segundos dizendo onde o
+   //--- fluxo parou. Serve para nao ter que adivinhar qual portao barrou.
+   if(InpLogDiag && InpLogDiagSeg > 0)
+   {
+      static datetime ultDiag = 0;
+      if(TimeCurrent() - ultDiag >= InpLogDiagSeg)
+      {
+         ultDiag = TimeCurrent();
+         long total = curta.volCompra + curta.volVenda + curta.volNeutro;
+         PrintFormat("DIAG | estado=%s | sinais C%d V%d (exige %d) | fita %d neg, vol %d | "
+                     "tend=%d acum=%d | pos=%s pend=%s | horario=%s | "
+                     "stopsLevel=%d stop=%d alvo=%d",
+                     estado, compras, vendas, minSinaisAtual,
+                     curta.negocios, (int)total,
+                     tend, LadoAcumulado(),
+                     HasOpenPosition() ? "sim" : "nao",
+                     HasPendingOrder() ? "sim" : "nao",
+                     TimeAllowed() ? "ok" : "fora",
+                     (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+                     InpStopPoints, InpTakePoints);
+      }
+   }
 
    if(direcao == 0) return;
 

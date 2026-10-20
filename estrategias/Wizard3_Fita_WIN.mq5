@@ -134,6 +134,8 @@ input double InpPerdaMaxDia    = 300;       // Perda maxima do dia em R$ (0 = se
 input int    InpPerdasSeguidas = 3;         // Para no dia apos N perdas seguidas (0 = nao)
 
 input group "Painel"
+input bool   InpLogDiag        = true;      // Registrar no log, periodicamente, por que NAO entrou
+input int    InpLogDiagSeg     = 30;        // Intervalo do diagnostico (segundos)
 input bool   InpPainel         = true;      // Mostrar painel no grafico
 input int    InpPainelX        = 12;        // Posicao X (pixels)
 input int    InpPainelY        = 24;        // Posicao Y (pixels)
@@ -941,6 +943,17 @@ int OnInit()
    gVotos[1] = 0;
    gVotos[2] = 0;
 
+   //--- ficha do simbolo. O nivel minimo de stop e o que decide se o
+   //--- stop e o alvo cabem: sem isso a corretora recusa a ordem.
+   long nivelMinStop = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   PrintFormat("--- %s | digitos=%d | point=%s | tick=%s | nivel minimo de stop=%d pontos",
+               _Symbol, _Digits, DoubleToString(_Point, _Digits),
+               DoubleToString(TickSz(), _Digits), (int)nivelMinStop);
+   if(nivelMinStop > 0 && (InpStopPoints < nivelMinStop || InpTakePoints < nivelMinStop))
+      PrintFormat("ERRO: stop %d / alvo %d nao alcancam o nivel minimo de %d pontos - "
+                  "a corretora vai recusar as ordens. Suba o menor dos dois.",
+                  InpStopPoints, InpTakePoints, (int)nivelMinStop);
+
    return(INIT_SUCCEEDED);
   }
 
@@ -1011,6 +1024,30 @@ void OnTick()
      }
 
    Painel();
+
+   //--- DIAGNOSTICO: uma linha por InpLogDiagSeg segundos dizendo onde o
+   //--- fluxo parou. Serve para nao ter que adivinhar qual portao barrou.
+   if(InpLogDiag && InpLogDiagSeg > 0)
+     {
+      static datetime ultDiag = 0;
+      if(TimeCurrent() - ultDiag >= InpLogDiagSeg)
+        {
+         ulong tkDiag;
+         int   dirDiag;
+         bool  temPend = Pendente(tkDiag, dirDiag);
+         ultDiag = TimeCurrent();
+         PrintFormat("DIAG | contexto %+.0f (AMA %d MACD %d Stoch %d) | fita %.1fx "
+                     "(exige %.1fx) | dom C %.0f%% V %.0f%% | agressao %d | "
+                     "pos=%s pend=%s | dia=%s | stopsLevel=%d stop=%d alvo=%d",
+                     gScore, gVotos[0], gVotos[1], gVotos[2],
+                     gFitaFator, InpAgrFator, gFitaDomC, gFitaDomV, gAgrDir,
+                     PosicaoAberta() ? "sim" : "nao",
+                     temPend ? "sim" : "nao",
+                     gBloqDia ? "BLOQUEADO" : "ok",
+                     (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+                     InpStopPoints, InpTakePoints);
+        }
+     }
 
    //--- entradas
    bool podeEntrar = (!gBloqDia) && (agora >= gIni) && (agora < gFim);
