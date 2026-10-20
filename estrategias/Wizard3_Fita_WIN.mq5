@@ -690,12 +690,19 @@ void CancelarVencida()
    if(posta <= 0)
       return;
 
-   //--- quantas barras do grafico se passaram desde o envio
+   //--- quantas barras do grafico se passaram desde o envio.
+   //--- iBarShift devolve -1 quando a ordem e mais antiga que o
+   //--- historico carregado. Uma ordem assim e velha, nao nova: sem
+   //--- este tratamento ela nunca expiraria e o robo ficaria preso,
+   //--- porque a existencia de uma pendente impede nova entrada.
    int barras = iBarShift(_Symbol, InpTF, posta, false);
-   if(barras >= InpValidadeBarras)
+   if(barras < 0 || barras >= InpValidadeBarras)
      {
       if(trade.OrderDelete(ticket))
-         PrintFormat("Limitada cancelada: venceram as %d barras de validade", InpValidadeBarras);
+         PrintFormat("Limitada cancelada: %s (validade %d barras)",
+                     (barras < 0) ? "mais antiga que o historico do grafico"
+                                  : "venceram as barras de validade",
+                     InpValidadeBarras);
      }
   }
 

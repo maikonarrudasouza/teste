@@ -1019,14 +1019,20 @@ void CancelExpiredOrders()
       if(criada <= 0) continue;
 
       //--- validade em BARRAS do grafico em que o EA esta: acompanha o
-      //--- tempo grafico em vez de ser um numero fixo de segundos
+      //--- tempo grafico em vez de ser um numero fixo de segundos.
+      //--- iBarShift devolve -1 quando a ordem e mais antiga que o
+      //--- historico carregado. Uma ordem assim e velha, nao nova:
+      //--- sem este tratamento ela nunca expiraria e travaria o robo
+      //--- em ORDEM PENDENTE para sempre.
       int barras = iBarShift(_Symbol, _Period, criada, false);
-      if(barras >= InpOrderValidBarras)
+      if(barras < 0 || barras >= InpOrderValidBarras)
       {
          trade.OrderDelete(ticket);
          if(InpLog)
-            PrintFormat("Limite cancelada: %d barra(s) sem execucao (validade %d)",
-                        barras, InpOrderValidBarras);
+            PrintFormat("Limite cancelada: %s (validade %d barras)",
+                        (barras < 0) ? "mais antiga que o historico do grafico"
+                                     : StringFormat("%d barra(s) sem execucao", barras),
+                        InpOrderValidBarras);
       }
    }
 }
