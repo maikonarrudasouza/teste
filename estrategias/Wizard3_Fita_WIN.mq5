@@ -23,10 +23,19 @@
 //|    A agressao precisa apontar para o MESMO lado do contexto.     |
 //|                                                                  |
 //|  ENTRADA                                                         |
-//|    Modo 1 (padrao): limitada OffsetLimite pontos melhor que o    |
-//|    preco, valida por ValidadeBarras barras do grafico, como nos  |
-//|    outros robos.                                                 |
 //|    Modo 0: a mercado, no momento da agressao.                    |
+//|    Modo 1 (padrao): limitada, valida por ValidadeBarras barras    |
+//|    do grafico, como nos outros robos. De onde o preco e medido    |
+//|    depende de AncoraLimite:                                       |
+//|      0 = preco atual menos OffsetLimite pontos (numero redondo)  |
+//|      1 = INICIO DA AGRESSAO, o primeiro negocio da janela, que e  |
+//|          o padrao: espera o preco voltar ao ponto de onde o       |
+//|          fluxo partiu                                             |
+//|      2 = base do movimento, o menor preco negociado na janela     |
+//|          numa compra e o maior numa venda                         |
+//|    AncoraFolga move a ordem alem da ancora, para um preco ainda   |
+//|    melhor. AncoraMinPts descarta a ordem que nascer perto demais   |
+//|    do preco atual, que na pratica seria uma ordem a mercado.      |
 //|                                                                  |
 //|  PROTECAO                                                        |
 //|    Stop e alvo vao na bolsa junto com a ordem.                   |
@@ -85,7 +94,10 @@ input int    InpAgrMediaN      = 30;        // Barras M1 para medir o volume nor
 
 input group "Entrada"
 input int    InpModoEntrada    = 1;         // 0 = a mercado | 1 = limitada
-input int    InpOffsetLimite   = 100;       // [modo 1] pontos melhor que o preco
+input int    InpAncoraLimite   = 1;         // 0 = preco atual | 1 = inicio da agressao | 2 = base do movimento
+input int    InpAncoraFolga    = 0;         // [ancora 1 e 2] pontos ALEM da ancora
+input int    InpAncoraMinPts   = 25;        // Distancia minima do preco atual (abaixo disso nao manda)
+input int    InpOffsetLimite   = 100;       // [ancora 0] pontos melhor que o preco atual
 input int    InpValidadeBarras = 3;         // [modo 1] validade da limitada (barras)
 
 input group "Stop e alvo"
@@ -138,7 +150,11 @@ int      gVotos[3];                        // AMA, MACD, Stoch
 datetime gUltAgr   = 0;                    // ultima leitura da fita
 int      gAgrDir   = 0;                    // lado da agressao atual
 double   gAgrFator = 0;                    // fator de volume da janela
+double   gAgrIni   = 0;                    // preco do primeiro negocio da janela
+double   gAgrMax   = 0;                    // maior preco negociado na janela
+double   gAgrMin   = 0;                    // menor preco negociado na janela
 
+double   gUltPreco = 0;                    // preco da ultima limitada enviada
 string   gPre = "W3F_";                    // prefixo dos objetos do painel
 
 //+------------------------------------------------------------------+
@@ -396,6 +412,11 @@ bool LerFita(int &dir, double &fator, double &subiu, double &caiu)
    if(pIni <= 0.0)
       return(false);
 
+   //--- publica os precos da janela, usados para ancorar a limitada
+   gAgrIni = pIni;
+   gAgrMax = pMax;
+   gAgrMin = pMin;
+
    double tk = TickSz();
    if(tk > 0.0)
      {
@@ -459,22 +480,48 @@ bool EnviarEntrada(const int dir)
       return(trade.Sell(InpLotes, _Symbol, 0.0, sl, tp, "W3F agressao"));
      }
 
-   //--- limitada
+   //--- limitada: de onde medir o preco
+   double ancora = 0.0;
+   if(InpAncoraLimite == 1)
+      ancora = gAgrIni;
+   else
+      if(InpAncoraLimite == 2)
+         ancora = (dir > 0) ? gAgrMin : gAgrMax;
+
    if(dir > 0)
      {
-      preco = ArredTick(t.last - InpOffsetLimite * _Point);
+      if(InpAncoraLimite == 0 || ancora <= 0.0)
+         preco = ArredTick(t.last - InpOffsetLimite * _Point);
+      else
+         preco = ArredTick(ancora - InpAncoraFolga * _Point);
+
+      //--- compra limitada tem que ficar abaixo do preco, e longe o
+      //--- suficiente para nao ser uma ordem a mercado disfarcada
       if(preco >= t.ask)
          return(false);
+      if((t.ask - preco) < InpAncoraMinPts * _Point)
+         return(false);
+
       sl = ArredTick(preco - InpStopPoints * _Point);
       tp = ArredTick(preco + InpTakePoints * _Point);
+      gUltPreco = preco;
       return(trade.BuyLimit(InpLotes, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, "W3F agressao"));
      }
 
-   preco = ArredTick(t.last + InpOffsetLimite * _Point);
+   if(InpAncoraLimite == 0 || ancora <= 0.0)
+      preco = ArredTick(t.last + InpOffsetLimite * _Point);
+   else
+      preco = ArredTick(ancora + InpAncoraFolga * _Point);
+
+   //--- venda limitada tem que ficar acima do preco
    if(preco <= t.bid)
       return(false);
+   if((preco - t.bid) < InpAncoraMinPts * _Point)
+      return(false);
+
    sl = ArredTick(preco + InpStopPoints * _Point);
    tp = ArredTick(preco - InpTakePoints * _Point);
+   gUltPreco = preco;
    return(trade.SellLimit(InpLotes, preco, _Symbol, sl, tp, ORDER_TIME_DAY, 0, "W3F agressao"));
   }
 
@@ -695,6 +742,11 @@ int OnInit()
       Print("InpModoEntrada aceita apenas 0 ou 1");
       return(INIT_PARAMETERS_INCORRECT);
      }
+   if(InpAncoraLimite < 0 || InpAncoraLimite > 2)
+     {
+      Print("InpAncoraLimite aceita apenas 0, 1 ou 2");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
 
    hAMA   = iAMA(_Symbol, InpTF, InpAMAPeriodo, InpAMAFast, InpAMASlow, 0, PRICE_CLOSE);
    hMACD  = iMACD(_Symbol, InpTF, InpMACDFast, InpMACDSlow, InpMACDSignal, PRICE_CLOSE);
@@ -808,7 +860,10 @@ void OnTick()
       return;
 
    if(EnviarEntrada(gContexto))
-      PrintFormat("Entrada %s: contexto %+.0f, agressao %.1fx",
-                  (gContexto > 0) ? "COMPRA" : "VENDA", gScore, gAgrFator);
+      PrintFormat("Entrada %s: contexto %+.0f, agressao %.1fx, janela %s..%s, limitada em %s",
+                  (gContexto > 0) ? "COMPRA" : "VENDA", gScore, gAgrFator,
+                  DoubleToString(gAgrIni, _Digits),
+                  DoubleToString((gContexto > 0) ? gAgrMax : gAgrMin, _Digits),
+                  DoubleToString(gUltPreco, _Digits));
   }
 //+------------------------------------------------------------------+
