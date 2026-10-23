@@ -1,0 +1,357 @@
+//------------------------------------------------------------------
+//  Consenso_WIN.ntsl  -  versao ProfitChart (NTSL) do Consenso_WIN.mq5
+//
+//  VOTACAO de peso igual, como no robo do MT5:
+//    Voto 1 - Agressao : agressao forte na barra, a favor do preco
+//    Voto 2 - Delta    : saldo de agressao acumulado das ultimas N barras
+//    Voto 3 - VP       : rompimento da area de valor (Value Area)
+//
+//  Cada voto vale +1 (compra), -1 (venda) ou 0, e continua valendo por
+//  Validade barras. Com VotosMin do mesmo lado, manda ordem LIMITE a
+//  Distancia pontos do fechamento (compra abaixo, venda acima).
+//  Stop e gain fixos. Zera no fim do dia.
+//
+//  DIFERENCAS PARA A VERSAO MT5 (nao da para fazer igual no NTSL):
+//   - A "Fita" do MT5 lia o Times & Trades a cada segundo. O NTSL nao
+//     da acesso negocio a negocio, so o volume de agressao por barra.
+//     Por isso os 4 votos viraram 3: a Fita foi absorvida pelo Delta.
+//   - Nao existe trailing nem reavaliacao no meio da barra: o NTSL
+//     roda no fechamento de cada candle.
+//   - Ordem no NTSL vive um candle. Para a limite "valer N barras",
+//     o robo reenvia a mesma ordem a cada candle ate vencer o prazo.
+//   - Os votos de Agressao e Delta usam AgressionVolBuy/Sell, que
+//     exigem Profit Pro com plugin TR, Ultra ou modulo Scalper.
+//     Sem isso, deixe UsarAgressao e UsarDelta como False e o robo
+//     opera so pela area de valor.
+//------------------------------------------------------------------
+input
+  //--- consenso
+  VotosMin(2);          // votos do mesmo lado para entrar (de 3)
+  Validade(5);          // barras que um voto continua valendo
+  UsarAgressao(True);   // voto 1
+  UsarDelta(True);      // voto 2
+  UsarVP(True);         // voto 3
+
+  //--- ordem
+  Distancia(200);       // pontos da limite ate o fechamento
+  ValidadeOrdem(3);     // barras que a limite fica viva
+  Qtde(1);              // contratos
+  StopPts(120);         // stop em pontos
+  GainPts(75);          // gain em pontos
+  Reverter(True);       // consenso contrario zera e vira a mao
+
+  //--- horario (HHMM)
+  HoraInicio(915);
+  HoraFim(1715);
+  HoraZerar(1750);
+
+  //--- voto 1: agressao
+  AgrMediaN(30);        // barras para o volume normal
+  AgrFator(2.0);        // volume da barra >= fator x media
+  AgrDominio(70);       // % do volume agredido de um lado
+
+  //--- voto 2: delta acumulado
+  DeltaN(10);           // barras do acumulado
+  DeltaMin(200);        // saldo minimo no periodo
+
+  //--- voto 3: area de valor
+  VPBarras(120);        // barras do perfil
+  VPFaixas(50);         // faixas de preco do perfil (max 200)
+  VPAreaPct(70);        // % do volume na area de valor
+  VPFolga(20);          // pontos alem da VAH/VAL para valer o rompimento
+
+var
+  i, b, poc, cima, baixo        : Integer;
+  nBar                          : Integer;
+  dirAgr, dirDelta, dirVP       : Integer;
+  barAgr, barDelta, barVP       : Integer;
+  compras, vendas, dir, nVotos  : Integer;
+  ordDir, ordBar                : Integer;
+  ordPreco, stopPreco, gainPreco: Float;
+  volMedia, volTotal, vCompra, vVenda : Float;
+  saldo, hi, lo, faixa, totalVol, alvoVol, acum, acumVP, vu, vd, br, ov, bl : Float;
+  vah, val                      : Float;
+  perfil                        : array[1..200] of Float;
+  temPos                        : Boolean;
+begin
+  //--- contador de barras
+  nBar := nBar[1] + 1;
+
+  //================================================================
+  //  VOTO 1 - AGRESSAO NA BARRA
+  //================================================================
+  dirAgr   := dirAgr[1];
+  barAgr   := barAgr[1];
+  if (UsarAgressao) then
+  begin
+    vCompra  := AgressionVolBuy;
+    vVenda   := AgressionVolSell;
+    volTotal := vCompra + vVenda;
+    volMedia := Media(AgrMediaN, Volume);
+    if ((volMedia > 0) and (volTotal >= AgrFator * volMedia)) then
+    begin
+      //--- so conta como agressao se o preco andou junto
+      if ((vCompra >= (AgrDominio / 100) * volTotal) and (Close > Open)) then
+      begin
+        dirAgr := 1;
+        barAgr := nBar;
+      end;
+      if ((vVenda >= (AgrDominio / 100) * volTotal) and (Close < Open)) then
+      begin
+        dirAgr := -1;
+        barAgr := nBar;
+      end;
+    end;
+  end;
+
+  //================================================================
+  //  VOTO 2 - SALDO DE AGRESSAO ACUMULADO
+  //================================================================
+  dirDelta := dirDelta[1];
+  barDelta := barDelta[1];
+  if (UsarDelta) then
+  begin
+    //--- acumulado proprio, para poder olhar N barras atras
+    acum := acum[1] + (AgressionVolBuy - AgressionVolSell);
+    if (nBar > DeltaN) then
+    begin
+      saldo := acum - acum[DeltaN];   // acum so e escrito aqui
+      if (saldo >= DeltaMin) then
+      begin
+        dirDelta := 1;
+        barDelta := nBar;
+      end;
+      if (saldo <= -DeltaMin) then
+      begin
+        dirDelta := -1;
+        barDelta := nBar;
+      end;
+    end;
+  end;
+
+  //================================================================
+  //  VOTO 3 - ROMPIMENTO DA AREA DE VALOR
+  //  Monta o perfil distribuindo o volume de cada barra entre as
+  //  faixas que ela cobriu, igual a versao do MT5.
+  //================================================================
+  dirVP := dirVP[1];
+  barVP := barVP[1];
+  if ((UsarVP) and (nBar > VPBarras + 1) and (VPFaixas >= 10) and (VPFaixas <= 200)) then
+  begin
+    //--- maxima e minima das VPBarras barras ja fechadas
+    hi := High[1];
+    lo := Low[1];
+    for b := 1 to VPBarras do
+    begin
+      if (High[b] > hi) then hi := High[b];
+      if (Low[b]  < lo) then lo := Low[b];
+    end;
+    if (hi > lo) then
+    begin
+      faixa := (hi - lo) / VPFaixas;
+      for i := 1 to VPFaixas do
+        perfil[i] := 0;
+
+      for b := 1 to VPBarras do
+      begin
+        br := High[b] - Low[b];
+        if (br <= 0) then
+        begin
+          i := Floor((Low[b] - lo) / faixa) + 1;
+          if (i < 1) then i := 1;
+          if (i > VPFaixas) then i := VPFaixas;
+          perfil[i] := perfil[i] + Volume[b];
+        end
+        else
+        begin
+          for i := 1 to VPFaixas do
+          begin
+            bl := lo + (i - 1) * faixa;
+            ov := Min(bl + faixa, High[b]) - Max(bl, Low[b]);
+            if (ov > 0) then
+              perfil[i] := perfil[i] + Volume[b] * (ov / br);
+          end;
+        end;
+      end;
+
+      //--- POC e volume total
+      poc      := 1;
+      totalVol := 0;
+      for i := 1 to VPFaixas do
+      begin
+        totalVol := totalVol + perfil[i];
+        if (perfil[i] > perfil[poc]) then
+          poc := i;
+      end;
+
+      if (totalVol > 0) then
+      begin
+        //--- cresce a area de valor do POC para os lados
+        alvoVol := totalVol * VPAreaPct / 100;
+        acumVP  := perfil[poc];
+        cima    := poc;
+        baixo   := poc;
+        while ((acumVP < alvoVol) and ((cima < VPFaixas) or (baixo > 1))) do
+        begin
+          vu := -1;
+          vd := -1;
+          if (cima < VPFaixas) then vu := perfil[cima + 1];
+          if (baixo > 1)       then vd := perfil[baixo - 1];
+          if ((vu >= vd) and (vu >= 0)) then
+          begin
+            cima := cima + 1;
+            acumVP := acumVP + perfil[cima];
+          end
+          else
+          begin
+            if (vd >= 0) then
+            begin
+              baixo := baixo - 1;
+              acumVP := acumVP + perfil[baixo];
+            end
+            else
+              acumVP := alvoVol;   // nao da para crescer mais: sai do laco
+          end;
+        end;
+
+        vah := lo + cima * faixa;
+        val := lo + (baixo - 1) * faixa;
+
+        if (Close > vah + VPFolga) then
+        begin
+          dirVP := 1;
+          barVP := nBar;
+        end;
+        if (Close < val - VPFolga) then
+        begin
+          dirVP := -1;
+          barVP := nBar;
+        end;
+      end;
+    end;
+  end;
+
+  //================================================================
+  //  PLACAR
+  //================================================================
+  compras := 0;
+  vendas  := 0;
+  if ((UsarAgressao) and (barAgr > 0) and (nBar - barAgr <= Validade)) then
+  begin
+    if (dirAgr > 0) then compras := compras + 1;
+    if (dirAgr < 0) then vendas  := vendas  + 1;
+  end;
+  if ((UsarDelta) and (barDelta > 0) and (nBar - barDelta <= Validade)) then
+  begin
+    if (dirDelta > 0) then compras := compras + 1;
+    if (dirDelta < 0) then vendas  := vendas  + 1;
+  end;
+  if ((UsarVP) and (barVP > 0) and (nBar - barVP <= Validade)) then
+  begin
+    if (dirVP > 0) then compras := compras + 1;
+    if (dirVP < 0) then vendas  := vendas  + 1;
+  end;
+
+  dir    := 0;
+  nVotos := 0;
+  if ((compras >= VotosMin) and (compras > vendas)) then
+  begin
+    dir    := 1;
+    nVotos := compras;
+  end;
+  if ((vendas >= VotosMin) and (vendas > compras)) then
+  begin
+    dir    := -1;
+    nVotos := vendas;
+  end;
+
+  //--- placar no grafico: +1 a +3 compra, -1 a -3 venda
+  Plot(compras - vendas);
+
+  //================================================================
+  //  FIM DO DIA
+  //================================================================
+  temPos := HasPosition;
+  if (TimeToMinutes(Time) >= TimeToMinutes(HoraZerar)) then
+  begin
+    CancelPendingOrders;
+    if (temPos) then
+      ClosePosition;
+    ordDir := 0;
+    ordBar := 0;
+  end
+  else
+  begin
+    ordDir   := ordDir[1];
+    ordBar   := ordBar[1];
+    ordPreco := ordPreco[1];
+
+    //================================================================
+    //  GESTAO DA POSICAO: stop e gain
+    //================================================================
+    if (temPos) then
+    begin
+      ordDir := 0;   // a ordem de entrada ja virou posicao
+      if (IsBought) then
+      begin
+        stopPreco := BuyPrice - StopPts;
+        gainPreco := BuyPrice + GainPts;
+        SellToCoverStop(stopPreco, stopPreco, BuyPositionQty);
+        SellToCoverLimit(gainPreco, BuyPositionQty);
+        //--- consenso virou contra: zera e vira
+        if ((Reverter) and (dir < 0)) then
+        begin
+          ClosePosition;
+          temPos := False;
+        end;
+      end;
+      if (IsSold) then
+      begin
+        stopPreco := SellPrice + StopPts;
+        gainPreco := SellPrice - GainPts;
+        BuyToCoverStop(stopPreco, stopPreco, SellPositionQty);
+        BuyToCoverLimit(gainPreco, SellPositionQty);
+        if ((Reverter) and (dir > 0)) then
+        begin
+          ClosePosition;
+          temPos := False;
+        end;
+      end;
+    end;
+
+    //================================================================
+    //  ENTRADA
+    //================================================================
+    if (not temPos) then
+    begin
+      //--- consenso novo: define a ordem
+      if ((dir <> 0) and (dir <> ordDir)) then
+      begin
+        if (dir > 0) then
+          ordPreco := Close - Distancia
+        else
+          ordPreco := Close + Distancia;
+        ordDir := dir;
+        ordBar := nBar;
+      end;
+
+      //--- ordem vencida
+      if ((ordDir <> 0) and (nBar - ordBar >= ValidadeOrdem)) then
+      begin
+        ordDir := 0;
+        ordBar := 0;
+      end;
+
+      //--- no NTSL a ordem morre no fim do candle: reenvia enquanto vale
+      if ((ordDir <> 0) and
+          (TimeToMinutes(Time) >= TimeToMinutes(HoraInicio)) and
+          (TimeToMinutes(Time) <  TimeToMinutes(HoraFim))) then
+      begin
+        if (ordDir > 0) then
+          BuyLimit(ordPreco, Qtde, True)
+        else
+          SellShortLimit(ordPreco, Qtde, True);
+      end;
+    end;
+  end;
+end;
