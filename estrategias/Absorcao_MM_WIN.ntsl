@@ -1,0 +1,190 @@
+//+------------------------------------------------------------------+
+//|  Absorcao_MM_WIN  -  Estrategia NTSL (Profit)                     |
+//|                                                                   |
+//|  Base: o codigo de 8 linhas que entra a mercado quando o preco    |
+//|  anda para um lado e a agressao dominante e do lado contrario,    |
+//|  com as medias de 9 e 21 como filtro de tendencia.                |
+//|                                                                   |
+//|  ORIGINAL                                                         |
+//|    if (Close > Close[1]) and (AgressionVolSell > AgressionVolBuy*3)|
+//|       and (Media(9,Close) < Media(21,Close)) then SellShortAtMarket|
+//|    if (Close < Close[1]) and (AgressionVolBuy > AgressionVolSell*3)|
+//|       and (Media(9,Close) > Media(21,Close)) then BuyAtMarket      |
+//|                                                                   |
+//|  O QUE FOI CORRIGIDO                                              |
+//|   1. NAO HAVIA SAIDA. A posicao era aberta e nunca encerrada:     |
+//|      sem stop, sem alvo, sem zerar no fim do dia. Agora o stop e  |
+//|      o alvo sao REENVIADOS a cada avaliacao em que existe         |
+//|      posicao, porque em NTSL uma ordem so vive um candle.         |
+//|   2. NAO HAVIA VOLUME MINIMO. Em candle fraco, 3 contratos        |
+//|      agredidos na venda contra 1 na compra passam no fator de 3x. |
+//|      VolMinimo exige um total minimo de agressao no candle.       |
+//|   3. NAO HAVIA AMPLITUDE MINIMA. "Close > Close[1]" aceita 1      |
+//|      ponto de alta. AmplitudeMin exige um deslocamento real.      |
+//|   4. NAO HAVIA TRAVA DE POSICAO. Sem "not HasPosition" o sinal    |
+//|      repetido reenvia ordem a mercado em candles seguidos.        |
+//|   5. SINAL INTRABARRA. Com o candle correndo, Close e o preco do  |
+//|      momento e a agressao ainda esta sendo formada: o sinal       |
+//|      aparece e some dentro do mesmo candle. BarraAnalise = 1 le   |
+//|      a ultima barra FECHADA; 0 mantem o comportamento original.   |
+//|   6. SEM FILTRO DE HORARIO. Entrada so na janela util e posicao   |
+//|      zerada em HoraZerar.                                         |
+//|                                                                   |
+//|  A DUVIDA QUE VOCE PRECISA RESOLVER (ModoSinal)                   |
+//|  Preco SOBE e a agressao vendedora e 3x a compradora. Na leitura  |
+//|  classica de fita isso e ABSORCAO: o vendedor esta batendo no     |
+//|  bid, nao consegue derrubar, e quem esta comprado passivo esta    |
+//|  ganhando - sinal de COMPRA. O codigo original VENDE, assumindo   |
+//|  que a alta e falsa por nao ter agressao compradora por tras.     |
+//|  As duas leituras existem e so o teste no seu ativo decide.       |
+//|    ModoSinal = 0 : contra o preco (original: sobe com agressao    |
+//|                    vendedora = vende)                             |
+//|    ModoSinal = 1 : a favor da absorcao (sobe com agressao         |
+//|                    vendedora = compra). Neste modo as medias      |
+//|                    tambem invertem, para o filtro continuar       |
+//|                    coerente com o lado da entrada.                |
+//|                                                                   |
+//|  SE O COMPILADOR RECLAMAR                                         |
+//|  As duas linhas "Media(...)[idx]" leem a media na mesma barra do  |
+//|  sinal. Se o editor nao aceitar indice no retorno da funcao,      |
+//|  troque por:                                                      |
+//|      mmRap := Media(MediaRapida, Close);                          |
+//|      mmLen := Media(MediaLenta,  Close);                          |
+//|  A diferenca e desprezivel: a media quase nao muda de uma barra   |
+//|  para a outra.                                                    |
+//|                                                                   |
+//|  v1.00 - primeira versao                                          |
+//+------------------------------------------------------------------+
+input
+  // --- Leitura ---
+  BarraAnalise(1);     // 0 = candle corrente (repinta) | 1 = ultima fechada
+  ModoSinal(0);        // 0 = contra o preco (original) | 1 = a favor da absorcao
+
+  // --- Gatilho ---
+  FatorAgressao(3.0);  // Quantas vezes um lado tem que ser maior que o outro
+  VolMinimo(300);      // Agressao total minima no candle (contratos)
+  AmplitudeMin(50);    // Deslocamento minimo do fechamento contra o anterior (pontos)
+
+  // --- Filtro de tendencia ---
+  UsarMedias(true);    // false = entra so pela agressao
+  MediaRapida(9);
+  MediaLenta(21);
+
+  // --- Saidas ---
+  StopPts(120);        // Stop em pontos
+  AlvoPts(75);         // Alvo em pontos
+  SlipStop(20);        // Folga entre o disparo do stop e o limite da ordem
+
+  // --- Horario ---
+  HoraInicio(915);     // Primeira entrada
+  HoraFimEntradas(1700);
+  HoraZerar(1750);     // Zera a posicao
+
+var
+  idx       : Integer;
+  fech      : Float;
+  fechAnt   : Float;
+  agrC      : Float;
+  agrV      : Float;
+  agrTotal  : Float;
+  mmRap     : Float;
+  mmLen     : Float;
+  subiu     : Boolean;
+  caiu      : Boolean;
+  dir       : Integer;   // +1 compra | -1 venda | 0 nada
+  horarioOk : Boolean;
+
+begin
+  idx := BarraAnalise;
+  if idx < 0 then idx := 0;
+
+  //================================================================
+  //  LEITURA
+  //================================================================
+  fech    := Close[idx];
+  fechAnt := Close[idx + 1];
+
+  agrC := AgressionVolBuy[idx];
+  agrV := AgressionVolSell[idx];
+  agrTotal := agrC + agrV;
+
+  //--- medias lidas na mesma barra do sinal
+  mmRap := Media(MediaRapida, Close)[idx];
+  mmLen := Media(MediaLenta,  Close)[idx];
+
+  //--- deslocamento com amplitude minima (antes bastava 1 ponto)
+  subiu := (fech - fechAnt) >= AmplitudeMin;
+  caiu  := (fechAnt - fech) >= AmplitudeMin;
+
+  dir := 0;
+
+  //================================================================
+  //  SINAL
+  //  So opina com agressao total suficiente no candle. Sem isso,
+  //  um candle de 4 contratos satisfaz o fator de 3x.
+  //================================================================
+  if agrTotal >= VolMinimo then
+  begin
+    //--- preco subiu e quem agrediu foi o VENDEDOR
+    if subiu and (agrV > agrC * FatorAgressao) then
+    begin
+      if ModoSinal = 0 then dir := -1   // original: vende a alta sem compra por tras
+      else                  dir :=  1;  // absorcao: o vendedor nao derrubou, compra
+    end
+    //--- preco caiu e quem agrediu foi o COMPRADOR
+    else if caiu and (agrC > agrV * FatorAgressao) then
+    begin
+      if ModoSinal = 0 then dir :=  1
+      else                  dir := -1;
+    end;
+  end;
+
+  //================================================================
+  //  FILTRO DE TENDENCIA
+  //  Mantido como no original: so entra a favor do cruzamento das
+  //  medias. Vale para os dois modos, sempre do lado da entrada.
+  //================================================================
+  if UsarMedias and (dir <> 0) then
+  begin
+    if (dir = -1) and (mmRap >= mmLen) then dir := 0;
+    if (dir =  1) and (mmRap <= mmLen) then dir := 0;
+  end;
+
+  horarioOk := (Time >= HoraInicio) and (Time < HoraFimEntradas);
+
+  if dir = -1 then PaintBar(clRed)
+  else if dir = 1 then PaintBar(clLime);
+
+  //================================================================
+  //  ORDENS
+  //================================================================
+  if HasPosition then
+  begin
+    //--- protecao REENVIADA sempre que existe posicao. Em NTSL a
+    //--- ordem morre no fim do candle se nao for reenviada, e era
+    //--- por isso que a posicao ficava descoberta.
+    if IsBought then
+    begin
+      SellToCoverLimit(BuyPrice + AlvoPts);
+      SellToCoverStop(BuyPrice - StopPts, BuyPrice - StopPts - SlipStop);
+    end
+    else
+    begin
+      BuyToCoverLimit(SellPrice - AlvoPts);
+      BuyToCoverStop(SellPrice + StopPts, SellPrice + StopPts + SlipStop);
+    end;
+
+    if Time >= HoraZerar then
+      ClosePosition;
+  end
+  else
+  begin
+    if horarioOk then
+    begin
+      if dir = -1 then
+        SellShortAtMarket
+      else if dir = 1 then
+        BuyAtMarket;
+    end;
+  end;
+end;
